@@ -34,7 +34,12 @@ async fn main() -> anyhow::Result<()> {
     // data/{YYYY-MM-DD}/{alias}-{kind}.jsonl, flushes on 30s/200-record
     // cadence and on channel close (Ctrl-C).
     let (tx, rx) = mpsc::channel::<Record>();
-    let writer = ivitals::storage::spawn_writer(rx, cfg.global.data_dir.clone().into());
+    let writer = ivitals::storage::spawn_writer(
+        rx,
+        cfg.global.data_dir.clone().into(),
+        // day count; u64 -> u32 is a no-op for any sane config
+        cfg.global.retention_days as u32,
+    );
 
     let mut collectors: HashMap<String, Box<dyn Collector>> = HashMap::new();
     for server in &cfg.servers {

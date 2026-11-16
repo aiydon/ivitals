@@ -28,6 +28,7 @@ use crate::model::Record;
 const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 const FLUSH_RECORDS: u64 = 200;
 const MAX_CONSECUTIVE_FAILURES: u32 = 10;
+const PRUNE_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
 /// UTC date directory name (`YYYY-MM-DD`) for a record timestamp.
 ///
@@ -40,6 +41,58 @@ pub fn utc_date_str(ts_ms: i64) -> String {
         .to_string()
 }
 
+/// Strict `YYYY-MM-DD` directory-name parser: exactly 10 chars, digits in
+/// the right places, and a real calendar date. Anything else is not ours.
+fn parse_date_dir(name: &str) -> Option<chrono::NaiveDate> {
+    let b = name.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    for (i, c) in b.iter().enumerate() {
+        if i != 4 && i != 7 && !c.is_ascii_digit() {
+            return None;
+        }
+    }
+    chrono::NaiveDate::parse_from_str(name, "%Y-%m-%d").ok()
+}
+
+/// Deletes whole `{data_dir}/{YYYY-MM-DD}` directories whose date is
+/// strictly older than `now - retention_days` (UTC).
+///
+/// Only directories whose name is a strict, valid date are candidates;
+/// everything else (other directories, stray files) is left untouched.
+/// Returns the number of directories removed. `now` is injected so the
+/// policy is unit-testable without a clock.
+pub fn prune(
+    data_dir: &std::path::Path,
+    retention_days: u32,
+    now: DateTime<Utc>,
+) -> io::Result<u32> {
+    let cutoff = now.date_naive() - chrono::Duration::days(retention_days as i64);
+    let mut removed = 0u32;
+    if !data_dir.exists() {
+        return Ok(0);
+    }
+    for entry in fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(date) = parse_date_dir(&name) else {
+            continue;
+        };
+        if date < cutoff && entry.path().is_dir() {
+            match fs::remove_dir_all(entry.path()) {
+                Ok(()) => {
+                    removed += 1;
+                    log::info!("retention: removed expired date dir {name}");
+                }
+                Err(e) => log::warn!("retention: failed to remove {name}: {e}"),
+            }
+        }
+    }
+    Ok(removed)
+}
+
 struct OpenFile {
     date: String,
     writer: BufWriter<File>,
@@ -47,6 +100,7 @@ struct OpenFile {
 
 struct Storage {
     data_dir: PathBuf,
+    retention_days: u32,
     /// (alias, kind) -> file currently open, tagged with the UTC date it
     /// was opened for so day changes force a roll.
     files: HashMap<(String, &'static str), OpenFile>,
@@ -56,13 +110,20 @@ struct Storage {
 }
 
 impl Storage {
-    fn new(data_dir: PathBuf) -> Self {
+    fn new(data_dir: PathBuf, retention_days: u32) -> Self {
         Self {
             data_dir,
+            retention_days,
             files: HashMap::new(),
             since_flush: Instant::now(),
             unflushed: 0,
             fail_streak: 0,
+        }
+    }
+
+    fn prune(&self) {
+        if let Err(e) = prune(&self.data_dir, self.retention_days, Utc::now()) {
+            log::warn!("retention prune failed: {e}");
         }
     }
 
@@ -131,8 +192,10 @@ impl Storage {
     }
 }
 
-fn run(rx: mpsc::Receiver<Record>, data_dir: PathBuf) {
-    let mut store = Storage::new(data_dir);
+fn run(rx: mpsc::Receiver<Record>, data_dir: PathBuf, retention_days: u32) {
+    let mut store = Storage::new(data_dir, retention_days);
+    store.prune();
+    let mut last_prune = Instant::now();
     'drain: loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(rec) => {
@@ -159,6 +222,10 @@ fn run(rx: mpsc::Receiver<Record>, data_dir: PathBuf) {
         if store.since_flush.elapsed() >= FLUSH_INTERVAL {
             store.flush_all();
         }
+        if last_prune.elapsed() >= PRUNE_INTERVAL {
+            last_prune = Instant::now();
+            store.prune();
+        }
     }
     // Final drain: flush everything so the last line on disk is complete.
     store.flush_all();
@@ -166,10 +233,14 @@ fn run(rx: mpsc::Receiver<Record>, data_dir: PathBuf) {
 
 /// Spawns the writer thread. `rx` is the receiver half of the storage
 /// channel; dropping the sender ends the thread after a final flush.
-pub fn spawn_writer(rx: mpsc::Receiver<Record>, data_dir: PathBuf) -> JoinHandle<()> {
+pub fn spawn_writer(
+    rx: mpsc::Receiver<Record>,
+    data_dir: PathBuf,
+    retention_days: u32,
+) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("ivitals-writer".into())
-        .spawn(move || run(rx, data_dir))
+        .spawn(move || run(rx, data_dir, retention_days))
         .expect("failed to spawn writer thread")
 }
 
@@ -246,7 +317,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_writer(rx, dir.clone());
+        let handle = spawn_writer(rx, dir.clone(), 30);
         // Day 2026-11-16 (UTC)
         tx.send(Record::Metrics(Box::new(sample(
             "math2",
@@ -300,6 +371,85 @@ mod tests {
             .unwrap();
         assert_eq!(m2.len(), 1);
         assert_eq!(m2[0]["ts_ms"], 1_794_873_601_000_i64);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A record whose UTC day is *earlier* than the one currently open
+    /// (out-of-order arrival) must reopen the earlier day's file in append
+    /// mode instead of appending to the wrong day.
+    #[test]
+    fn writer_reopens_earlier_day() {
+        let dir = std::env::temp_dir().join(format!("ivitals-rewrite-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let (tx, rx) = mpsc::channel();
+        let handle = spawn_writer(rx, dir.clone(), 30);
+        tx.send(Record::Metrics(Box::new(sample("a", 1_794_821_040_000))))
+            .unwrap(); // d1
+        tx.send(Record::Metrics(Box::new(sample("a", 1_794_873_601_000))))
+            .unwrap(); // d2
+        tx.send(Record::Metrics(Box::new(sample("a", 1_794_821_050_000))))
+            .unwrap(); // d1 again
+        drop(tx);
+        handle.join().unwrap();
+
+        let d1 = fs::read_to_string(dir.join("2026-11-16").join("a-metrics.jsonl")).unwrap();
+        let d2 = fs::read_to_string(dir.join("2026-11-17").join("a-metrics.jsonl")).unwrap();
+        let d1: Vec<serde_json::Value> = d1
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(d1.len(), 2);
+        assert_eq!(d1[0]["ts_ms"], 1_794_821_040_000_i64);
+        assert_eq!(d1[1]["ts_ms"], 1_794_821_050_000_i64);
+        assert_eq!(d2.lines().count(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Retention policy: whole expired date dirs are removed; the boundary
+    /// day (exactly `retention_days` old) is kept; non-date dirs, invalid
+    /// dates and stray files are never touched.
+    #[test]
+    fn prune_removes_only_expired_date_dirs() {
+        let dir = std::env::temp_dir().join(format!("ivitals-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // now = 2026-11-16T12:00:00Z; retention 30 -> cutoff 2026-10-17 (kept).
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for name in [
+            "2020-01-01", // expired: removed
+            "2026-10-16", // expired: removed
+            "2026-10-17", // boundary: kept
+            "2026-11-15", // recent: kept
+            "2026-2-3",   // not strict zero-padded: kept
+            "2026-02-30", // invalid calendar date: kept
+            "keepme",     // not a date: kept
+        ] {
+            let d = dir.join(name);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("x.jsonl"), "line\n").unwrap();
+        }
+        fs::write(dir.join("stray.txt"), "not ours\n").unwrap();
+
+        let removed = prune(&dir, 30, now).unwrap();
+        assert_eq!(removed, 2);
+        assert!(!dir.join("2020-01-01").exists());
+        assert!(!dir.join("2026-10-16").exists());
+        assert!(dir.join("2026-10-17").join("x.jsonl").exists());
+        assert!(dir.join("2026-11-15").exists());
+        assert!(dir.join("2026-2-3").exists());
+        assert!(dir.join("2026-02-30").exists());
+        assert!(dir.join("keepme").exists());
+        assert!(dir.join("stray.txt").exists());
+
+        // Missing data dir is not an error.
+        assert_eq!(prune(&dir.join("nope"), 30, now).unwrap(), 0);
 
         let _ = fs::remove_dir_all(&dir);
     }
