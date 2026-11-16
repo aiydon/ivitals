@@ -2,6 +2,7 @@
 
 pub mod local;
 pub mod nvml;
+pub mod remote;
 
 use crate::model::{MetricSample, ProcessSnapshot};
 

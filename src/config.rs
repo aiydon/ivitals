@@ -19,6 +19,10 @@ pub struct Server {
     pub ssh_host: Option<String>,
     #[serde(default)]
     pub ssh_user: Option<String>,
+    /// Private key file for publickey auth. When omitted, ivitals tries the
+    /// ssh-agent first, then probes ~/.ssh/id_ed25519|id_ecdsa|id_rsa.
+    #[serde(default)]
+    pub ssh_key: Option<String>,
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_secs: u64,
     #[serde(default = "default_exec_timeout")]
