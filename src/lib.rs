@@ -14,5 +14,6 @@
 /// Data schema version written into every record.
 pub const SCHEMA_VERSION: u32 = 1;
 
+pub mod collector;
 pub mod config;
 pub mod model;

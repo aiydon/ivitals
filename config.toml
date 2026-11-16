@@ -1,0 +1,46 @@
+# ivitals configuration. Zero CLI args: this file is the only input.
+schema_version = 1
+
+[global]
+interval_secs = 5
+process_interval_secs = 60
+top_n_processes = 20
+retention_days = 30
+data_dir = "data"
+log_level = "info"
+
+[extras]
+cpu_detail = true
+memory_detail = true
+disk_io = true
+net = true
+gpu_detail = "auto"
+slurm = "auto"
+
+[[servers]]
+alias = "math2"
+mode = "remote"
+ssh_host = "math2"
+ssh_user = "monitor"
+connect_timeout_secs = 5
+exec_timeout_secs = 15
+
+[[servers]]
+alias = "bot"
+mode = "remote"
+ssh_host = "bot"
+ssh_user = "monitor"
+connect_timeout_secs = 5
+exec_timeout_secs = 15
+
+[[servers]]
+alias = "amax"
+mode = "remote"
+ssh_host = "amax"
+ssh_user = "monitor"
+connect_timeout_secs = 5
+exec_timeout_secs = 15
+
+[[servers]]
+alias = "local"
+mode = "local"
