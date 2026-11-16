@@ -3,12 +3,18 @@
 //! Zero command-line arguments. The only input is `config.toml`, resolved
 //! in the order `$IVITALS_CONFIG` -> `$PWD/config.toml` -> `<exe dir>/config.toml`.
 
+use std::collections::HashMap;
+use std::sync::mpsc;
+
 use ivitals::collector::local::LocalCollector;
 use ivitals::collector::remote::RemoteCollector;
 use ivitals::collector::Collector;
 use ivitals::config::{Config, Mode};
+use ivitals::model::Record;
+use ivitals::scheduler::Scheduler;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
     init_logger(&cfg.global.log_level);
     log::info!(
@@ -24,76 +30,56 @@ fn main() -> anyhow::Result<()> {
         cfg.global.data_dir,
     );
 
-    // C6: one collection round per server, logged as JSON so the
-    // model/collector contract can be inspected without the storage layer.
+    // Storage channel. For now a counting placeholder drains it; the
+    // single-writer disk thread replaces this (storage module).
+    let (tx, rx) = mpsc::channel::<Record>();
+    std::thread::spawn(move || {
+        let mut n = 0u64;
+        for rec in rx {
+            n += 1;
+            log::debug!("record buffered #{n} ({})", rec.kind());
+        }
+        log::info!("record channel closed, {n} records seen");
+    });
+
+    let mut collectors: HashMap<String, Box<dyn Collector>> = HashMap::new();
     for server in &cfg.servers {
         match server.mode {
             Mode::Local => {
-                let mut collector = LocalCollector::new(&server.alias, cfg.global.top_n_processes);
-                if let Ok(sample) = collector.metrics() {
-                    log::info!(
-                        "sample[{}]: {}",
-                        server.alias,
-                        serde_json::to_string(&sample).unwrap_or_default()
-                    );
-                }
-                if let Ok(snapshot) = collector.processes() {
-                    log_snapshot(&server.alias, &snapshot);
-                }
+                collectors.insert(
+                    server.alias.clone(),
+                    Box::new(LocalCollector::new(
+                        &server.alias,
+                        cfg.global.top_n_processes,
+                    )),
+                );
             }
             Mode::Remote => {
                 let host = server.ssh_host.clone().unwrap_or_default();
                 let user = server.ssh_user.clone().unwrap_or_default();
-                let mut collector = RemoteCollector::new(
-                    &server.alias,
-                    &host,
-                    &user,
-                    server.ssh_key.clone(),
-                    server.connect_timeout_secs,
-                    server.exec_timeout_secs,
-                    cfg.global.top_n_processes,
+                collectors.insert(
+                    server.alias.clone(),
+                    Box::new(RemoteCollector::new(
+                        &server.alias,
+                        &host,
+                        &user,
+                        server.ssh_key.clone(),
+                        server.connect_timeout_secs,
+                        server.exec_timeout_secs,
+                        cfg.global.top_n_processes,
+                    )),
                 );
-                match collector.metrics() {
-                    Ok(sample) => log::info!(
-                        "sample[{}]: {}",
-                        server.alias,
-                        serde_json::to_string(&sample).unwrap_or_default()
-                    ),
-                    Err(e) => {
-                        log::warn!("remote {alias}: metrics failed: {e}", alias = server.alias)
-                    }
-                }
-                match collector.processes() {
-                    Ok(snapshot) => log_snapshot(&server.alias, &snapshot),
-                    Err(e) => log::warn!(
-                        "remote {alias}: processes failed: {e}",
-                        alias = server.alias
-                    ),
-                }
             }
         }
     }
-    Ok(())
-}
 
-fn log_snapshot(alias: &str, snapshot: &ivitals::model::ProcessSnapshot) {
-    log::info!(
-        "snapshot[{}]: top={} total={:?}",
-        alias,
-        snapshot.processes.len(),
-        snapshot.total_procs
-    );
-    for row in snapshot.processes.iter().take(5) {
-        log::info!(
-            "  pid={} {} cpu={:.1}% mem={:.2}% state={:?} cum_ms={:?}",
-            row.pid,
-            row.name,
-            row.cpu_percent,
-            row.mem_percent,
-            row.state,
-            row.cum_cpu_ms
-        );
-    }
+    let sched = Scheduler::new(&cfg, collectors, tx);
+    let sched_task = tokio::spawn(async move { sched.run().await });
+
+    tokio::signal::ctrl_c().await?;
+    log::info!("ctrl-c: shutting down");
+    sched_task.abort();
+    Ok(())
 }
 
 fn init_logger(level: &str) {

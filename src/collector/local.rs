@@ -88,9 +88,11 @@ impl Collector for LocalCollector {
             .map(|p| (p.cpu_usage(), p))
             .collect();
         ranked.sort_by(|a, b| {
+            // cpu desc, then memory desc, then pid asc (stable snapshots).
             b.0.partial_cmp(&a.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.1.memory().cmp(&a.1.memory()).reverse())
+                .then_with(|| b.1.memory().cmp(&a.1.memory()))
+                .then_with(|| a.1.pid().cmp(&b.1.pid()))
         });
         ranked.truncate(self.top_n);
         let processes = ranked

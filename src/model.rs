@@ -218,6 +218,41 @@ pub struct ProcRow {
     pub state: Option<char>,
 }
 
+/// Routing envelope for the storage channel: one collected record headed to
+/// either a `*-metrics.jsonl` or a `*-processes.jsonl` file.
+///
+/// The metrics variant is boxed: it is ~4x larger than the processes
+/// variant, and channel messages should not pay that size on every send.
+#[derive(Debug)]
+pub enum Record {
+    Metrics(Box<MetricSample>),
+    Processes(ProcessSnapshot),
+}
+
+impl Record {
+    /// Which file kind this record belongs to ("metrics" | "processes").
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Record::Metrics(_) => "metrics",
+            Record::Processes(_) => "processes",
+        }
+    }
+
+    pub fn alias(&self) -> &str {
+        match self {
+            Record::Metrics(s) => &s.server,
+            Record::Processes(p) => &p.server,
+        }
+    }
+
+    pub fn ts_ms(&self) -> i64 {
+        match self {
+            Record::Metrics(s) => s.ts_ms,
+            Record::Processes(p) => p.ts_ms,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
