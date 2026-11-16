@@ -15,3 +15,4 @@
 pub const SCHEMA_VERSION: u32 = 1;
 
 pub mod config;
+pub mod model;
