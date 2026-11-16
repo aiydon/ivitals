@@ -180,7 +180,7 @@ degradation, not a fault); * = missing on the first tick of a run
 
 ## Volume
 
-Measured/estimated with all extras on (per
+Estimated with all extras on (per
 [docs/metrics-research.md §6](docs/metrics-research.md)):
 
 | Host | Per day (17 280 metrics ticks + 1 440 per-core ticks) |
@@ -188,8 +188,12 @@ Measured/estimated with all extras on (per
 | local | ~16 MB |
 | math2 | ~37 MB |
 | bot | ~16 MB |
-| amax | ~33 MB |
+| amax | ~20 MB |
 | **Total** | **≈ 102 MB/day ≈ 3.0 GB/month** |
+
+Measured on 2026-11-16 (12-min full-config run, all extras on):
+local 16.4 / bot 15.7 / amax 18.5 / math2 26.8 MB/day —
+**≈ 77.7 MB/day ≈ 2.3 GB/month**, within ±30% of the estimate.
 
 Core-only (extras off) runs ~37 MB/day total, matching the "30 MB/day
 class" target. Disabling `disk_io` + `gpu_detail` brings the full set
