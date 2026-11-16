@@ -3,49 +3,43 @@
 //! Zero command-line arguments: the only input is `config.toml`, resolved in
 //! the order `$IVITALS_CONFIG`, `$PWD/config.toml`, `<exe dir>/config.toml`.
 
-use std::path::PathBuf;
-
 fn main() -> anyhow::Result<()> {
-    let path = resolve_config_path();
-    if !path.is_file() {
-        anyhow::bail!("ivitals: config not found: {}", path.display());
-    }
-    eprintln!("ivitals: config at {}", path.display());
+    let cfg = ivitals::config::Config::load()?;
+    init_logger(&cfg.global.log_level);
+    log::info!(
+        "ivitals starting: servers=[{}] interval={}s process_interval={}s top_n={} retention={}d data_dir={}",
+        cfg.servers
+            .iter()
+            .map(|s| s.alias.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        cfg.global.interval_secs,
+        cfg.global.process_interval_secs,
+        cfg.global.top_n_processes,
+        cfg.global.retention_days,
+        cfg.global.data_dir,
+    );
     Ok(())
 }
 
-/// Resolve the config path without reading the file.
-fn resolve_config_path() -> PathBuf {
-    if let Ok(p) = std::env::var("IVITALS_CONFIG") {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
+/// Initialize the logger. An explicit `RUST_LOG` always wins; otherwise the
+/// `log_level` from config applies.
+fn init_logger(level: &str) {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    if std::env::var("RUST_LOG").is_err() {
+        builder.filter_level(parse_level(level));
     }
-    let cwd = PathBuf::from("config.toml");
-    if cwd.is_file() {
-        return cwd;
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("config.toml");
-            if p.is_file() {
-                return p;
-            }
-        }
-    }
-    // Fallback: report the expected $PWD location so errors are actionable.
-    PathBuf::from("config.toml")
+    builder.init();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_pwd_config_when_present() {
-        // Running from the crate root in CI/dev: config.toml is there.
-        if PathBuf::from("config.toml").is_file() {
-            assert_eq!(resolve_config_path(), PathBuf::from("config.toml"));
-        }
+fn parse_level(s: &str) -> log::LevelFilter {
+    match s.to_ascii_lowercase().as_str() {
+        "error" => log::LevelFilter::Error,
+        "warn" => log::LevelFilter::Warn,
+        "info" => log::LevelFilter::Info,
+        "debug" => log::LevelFilter::Debug,
+        "trace" => log::LevelFilter::Trace,
+        _ => log::LevelFilter::Info,
     }
 }
