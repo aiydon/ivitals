@@ -1,6 +1,7 @@
 //! Collectors: one per configured server, local or remote.
 
 pub mod local;
+pub mod nvml;
 
 use crate::model::{MetricSample, ProcessSnapshot};
 

@@ -5,10 +5,9 @@ use std::time::Instant;
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+use crate::collector::nvml::NvmlProbe;
 use crate::collector::{now_ms, CollectError, Collector};
-use crate::model::{
-    CpuInfo, Extras, GpuStatus, MemoryInfo, MetricSample, ProcRow, ProcessSnapshot,
-};
+use crate::model::{CpuInfo, Extras, MemoryInfo, MetricSample, ProcRow, ProcessSnapshot};
 use crate::SCHEMA_VERSION;
 
 /// Collects metrics from the machine ivitals runs on.
@@ -16,6 +15,7 @@ pub struct LocalCollector {
     alias: String,
     top_n: usize,
     sys: System,
+    nvml: NvmlProbe,
 }
 
 impl LocalCollector {
@@ -29,6 +29,7 @@ impl LocalCollector {
             alias: alias.to_string(),
             top_n,
             sys,
+            nvml: NvmlProbe::new(),
         }
     }
 }
@@ -66,7 +67,7 @@ impl Collector for LocalCollector {
                 used_bytes: total_bytes.saturating_sub(available_bytes),
                 available_bytes,
             },
-            gpu: GpuStatus::Absent,
+            gpu: self.nvml.probe(),
             extras: Extras::default(),
         })
     }
