@@ -44,6 +44,11 @@ GPU 效率、调度器层(Slurm)、进程层补充。结论先行:**七个方向
   raw 文件);当前实际可用的是 `~/.ssh/config` 中的别名默认用户
   (math2→iydon、bot→sinotruk、amax→math)。`monitor` 账号上线后无需改
   代码,只改 `config.toml` 的 `ssh_user`。
+- 远程连接实现:`ssh2` 0.9 不暴露 ssh config 解析 API,collector 内置一个
+  最小 `~/.ssh/config` 解析器(仅 `HostName`/`Port`/`IdentityFile`,首个匹配
+  `Host` 块生效,`~` 展开),启动时读一次;bot 的非标准端口 7105 即经由此
+  路径解析。未匹配到别名时按字面主机名 + 22 端口连接,主机名走标准 DNS
+  解析。
 
 ## 3. 逐方向结论(§7.1)
 

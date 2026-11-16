@@ -57,6 +57,12 @@ connect_timeout_secs = 5
 exec_timeout_secs = 15
 ```
 
+`ssh_host` may be an alias from `~/.ssh/config`: ivitals resolves
+`HostName`, `Port`, and `IdentityFile` from the first matching `Host`
+block (the config file is read once at startup). `ssh_user` always wins
+over a `User` line in the ssh config. Without a matching block the host
+is used literally on port 22.
+
 An extras family set to `false`/`"off"` is not collected at all: no
 fields, no cost. Availability of the optional sources (NVIDIA driver,
 DCGM, slurm, `/proc/pressure`) is probed once and cached; a missing

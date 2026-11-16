@@ -15,7 +15,7 @@
 //!   (BatchMode semantics).
 
 use std::io::Read;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use ssh2::Session;
@@ -35,6 +35,120 @@ const SCRIPT: &str = include_str!("scripts/collect.sh");
 /// constant; re-encoding 3.6 KB on every SSH tick is pure waste).
 static SCRIPT_B64: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| b64_encode(SCRIPT.as_bytes()));
+
+/// Resolved connection target from `~/.ssh/config`.
+struct SshEntry {
+    host_name: String,
+    port: u16,
+    identity_files: Vec<String>,
+}
+
+/// One `Host` block: the host patterns it matches plus the options seen in
+/// it (first occurrence of each option wins, ssh semantics).
+struct SshBlock {
+    hosts: Vec<String>,
+    host_name: Option<String>,
+    port: Option<u16>,
+    identity_files: Vec<String>,
+}
+
+/// Parse `~/.ssh/config` into Host blocks. Only the option subset the
+/// collector needs is kept: `HostName`, `Port`, `IdentityFile`. A host
+/// matches a block iff it appears verbatim in one of the block's `Host`
+/// patterns (wildcards are not expanded — this project's aliases are
+/// literal); the first matching block wins, and within a block the first
+/// occurrence of each option wins (ssh semantics).
+fn parse_ssh_config(text: &str) -> Vec<SshBlock> {
+    let mut blocks: Vec<SshBlock> = Vec::new();
+    let mut cur: Option<usize> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = match line.split_once(char::is_whitespace) {
+            Some(p) => p,
+            None => continue,
+        };
+        let key = key.to_ascii_lowercase();
+        let value = value.trim();
+        if key == "host" {
+            blocks.push(SshBlock {
+                hosts: value.split_whitespace().map(str::to_string).collect(),
+                host_name: None,
+                port: None,
+                identity_files: Vec::new(),
+            });
+            cur = Some(blocks.len() - 1);
+            continue;
+        }
+        let Some(i) = cur else {
+            continue; // option before any Host line (global scope): skip
+        };
+        let b = &mut blocks[i];
+        match key.as_str() {
+            "hostname" => {
+                if b.host_name.is_none() {
+                    b.host_name = Some(value.to_string());
+                }
+            }
+            "port" => {
+                if b.port.is_none() {
+                    b.port = value.parse().ok();
+                }
+            }
+            "identityfile" => {
+                for f in value.split_whitespace() {
+                    b.identity_files.push(f.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    blocks
+}
+
+/// Look up `host` in `~/.ssh/config` (read and parsed once). `None` when
+/// the file is absent or no block matches — callers then use the literal
+/// host on port 22.
+fn ssh_config_lookup(host: &str) -> Option<SshEntry> {
+    static BLOCKS: std::sync::OnceLock<Vec<SshBlock>> = std::sync::OnceLock::new();
+    let blocks = BLOCKS.get_or_init(|| {
+        std::env::var_os("HOME")
+            .map(|h| std::path::Path::new(&h).join(".ssh").join("config"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .as_deref()
+            .map(parse_ssh_config)
+            .unwrap_or_default()
+    });
+    find_entry(blocks, host)
+}
+
+/// First matching block wins; `HostName` defaults to the alias itself and
+/// `Port` to 22. `IdentityFile` entries with a leading `~` are expanded
+/// against `$HOME`.
+fn find_entry(blocks: &[SshBlock], host: &str) -> Option<SshEntry> {
+    blocks
+        .iter()
+        .find(|b| b.hosts.iter().any(|h| h == host))
+        .map(|b| SshEntry {
+            host_name: b.host_name.clone().unwrap_or_else(|| host.to_string()),
+            port: b.port.unwrap_or(22),
+            identity_files: b
+                .identity_files
+                .iter()
+                .map(|f| {
+                    if let Some(rest) = f.strip_prefix('~') {
+                        std::env::var_os("HOME")
+                            .map(|h| format!("{}{}", h.to_string_lossy(), rest))
+                            .unwrap_or_else(|| f.clone())
+                    } else {
+                        f.clone()
+                    }
+                })
+                .collect(),
+        })
+}
 
 pub struct RemoteCollector {
     alias: String,
@@ -87,6 +201,14 @@ impl RemoteCollector {
         if let Some(key) = &self.ssh_key {
             candidates.push(key.clone());
         }
+        // IdentityFile entries from ~/.ssh/config (the ssh CLI honors them).
+        if let Some(entry) = ssh_config_lookup(&self.host) {
+            for f in &entry.identity_files {
+                if std::path::Path::new(f).is_file() {
+                    candidates.push(f.clone());
+                }
+            }
+        }
         if let Some(home) = std::env::var_os("HOME") {
             for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
                 let p = std::path::Path::new(&home).join(".ssh").join(name);
@@ -115,14 +237,19 @@ impl RemoteCollector {
     /// `with_extras` appends the enabled extras flags (metrics runs only —
     /// process runs re-collecting them would double the remote cost).
     fn run_script(&self, with_processes: bool, with_extras: bool) -> Result<String, CollectError> {
-        let addr = format!("{}:22", self.host);
-        let tcp = TcpStream::connect_timeout(
-            &addr
-                .parse()
-                .map_err(|e| CollectError::Remote(format!("bad host {addr}: {e}")))?,
-            self.connect_timeout,
-        )
-        .map_err(|e| CollectError::Remote(format!("connect {addr}: {e}")))?;
+        // Resolve Host aliases / Port from ~/.ssh/config (ssh2 0.9 exposes
+        // no config API), so `ssh_host = "math2"` behaves like the ssh CLI.
+        let (host, port) = match ssh_config_lookup(&self.host) {
+            Some(e) => (e.host_name, e.port),
+            None => (self.host.clone(), 22),
+        };
+        let addr = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|e| CollectError::Remote(format!("resolve {host}:{port}: {e}")))?
+            .next()
+            .ok_or_else(|| CollectError::Remote(format!("resolve {host}:{port}: no addresses")))?;
+        let tcp = TcpStream::connect_timeout(&addr, self.connect_timeout)
+            .map_err(|e| CollectError::Remote(format!("connect {addr}: {e}")))?;
         tcp.set_nodelay(true).ok();
 
         let mut session =
@@ -422,5 +549,81 @@ mod tests {
         let out = child.wait_with_output().unwrap();
         let std_out = String::from_utf8(out.stdout).unwrap();
         assert_eq!(ours, std_out.trim_end());
+    }
+
+    #[test]
+    fn ssh_config_resolves_alias_hostname_and_port() {
+        let cfg = "# a comment\n\
+                   Host bot\n\
+                       HostName frp.iydon.top\n\
+                       Port 7105\n\
+                       User sinotruk\n\
+                   Host math2 amax2\n\
+                       HostName 10.16.122.147\n";
+        let blocks = parse_ssh_config(cfg);
+        assert_eq!(blocks.len(), 2);
+        // First matching block wins; multiple patterns per Host line.
+        let bot = blocks
+            .iter()
+            .find(|b| b.hosts.iter().any(|h| h == "bot"))
+            .unwrap();
+        assert_eq!(bot.host_name.as_deref(), Some("frp.iydon.top"));
+        assert_eq!(bot.port, Some(7105));
+        let math2 = blocks
+            .iter()
+            .find(|b| b.hosts.iter().any(|h| h == "math2"))
+            .unwrap();
+        assert_eq!(math2.host_name.as_deref(), Some("10.16.122.147"));
+        assert_eq!(math2.port, None); // default 22 applied by lookup
+        assert!(blocks.iter().all(|b| b.identity_files.is_empty()));
+    }
+
+    #[test]
+    fn ssh_config_first_option_wins_and_identity_files_collected() {
+        let cfg = "Host dev\n\
+                   IdentityFile ~/.ssh/id_ed25519 /tmp/other.key\n\
+                   Port 2222\n\
+                   Port 2223\n\
+                   HostName first.example\n\
+                   HostName second.example\n";
+        let blocks = parse_ssh_config(cfg);
+        let dev = &blocks[0];
+        assert_eq!(dev.port, Some(2222));
+        assert_eq!(dev.host_name.as_deref(), Some("first.example"));
+        assert_eq!(
+            dev.identity_files,
+            vec!["~/.ssh/id_ed25519", "/tmp/other.key"]
+        );
+    }
+
+    #[test]
+    fn ssh_config_bad_port_yields_none_not_error() {
+        let cfg = "Host x\nHostName h\nPort notanumber\n";
+        let blocks = parse_ssh_config(cfg);
+        assert_eq!(blocks[0].port, None);
+    }
+
+    #[test]
+    fn ssh_config_options_before_host_are_skipped() {
+        let cfg = "ServerAliveInterval 60\nHost a\nHostName h1\n";
+        let blocks = parse_ssh_config(cfg);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].hosts, vec!["a"]);
+    }
+
+    #[test]
+    fn ssh_config_lookup_defaults_and_missing_host() {
+        let blocks = parse_ssh_config("Host a\nHost b\nHostName b.example\nPort 2222\n");
+        // Matched block without explicit HostName/Port: alias + 22.
+        let a = find_entry(&blocks, "a").unwrap();
+        assert_eq!(a.host_name, "a");
+        assert_eq!(a.port, 22);
+        // Matched block with both: values from the config.
+        let b = find_entry(&blocks, "b").unwrap();
+        assert_eq!(b.host_name, "b.example");
+        assert_eq!(b.port, 2222);
+        // No matching block: None (caller uses the literal host).
+        assert!(find_entry(&blocks, "nope").is_none());
+        assert!(find_entry(&[], "a").is_none());
     }
 }
