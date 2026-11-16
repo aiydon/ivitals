@@ -1,0 +1,29 @@
+[package]
+name = "ivitals"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Config-driven resident resource monitoring daemon (local + SSH remote, GPU optional, date-partitioned JSONL)"
+license = "MIT"
+
+[lib]
+name = "ivitals"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ivitals"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+env_logger = "0.11"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+toml = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
