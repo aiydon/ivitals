@@ -65,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
                         &host,
                         &user,
                         server.ssh_key.clone(),
+                        server.ssh_port,
                         server.connect_timeout_secs,
                         server.exec_timeout_secs,
                         cfg.global.top_n_processes,

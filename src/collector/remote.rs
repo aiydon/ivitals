@@ -124,6 +124,16 @@ fn ssh_config_lookup(host: &str) -> Option<SshEntry> {
     find_entry(blocks, host)
 }
 
+/// Resolve the connect endpoint: `~/.ssh/config` wins for the host name, an
+/// explicit `ssh_port` in config.toml always wins over the config `Port`,
+/// and a literal host falls back to port 22.
+fn resolve_endpoint(host: &str, ssh_port: Option<u16>) -> (String, u16) {
+    match ssh_config_lookup(host) {
+        Some(e) => (e.host_name, ssh_port.unwrap_or(e.port)),
+        None => (host.to_string(), ssh_port.unwrap_or(22)),
+    }
+}
+
 /// First matching block wins; `HostName` defaults to the alias itself and
 /// `Port` to 22. `IdentityFile` entries with a leading `~` are expanded
 /// against `$HOME`.
@@ -155,6 +165,8 @@ pub struct RemoteCollector {
     host: String,
     user: String,
     ssh_key: Option<String>,
+    /// Explicit port from config.toml; wins over `~/.ssh/config`.
+    ssh_port: Option<u16>,
     connect_timeout: Duration,
     exec_timeout: Duration,
     top_n: usize,
@@ -164,7 +176,7 @@ pub struct RemoteCollector {
 }
 
 impl RemoteCollector {
-    /// Eight flat parameters keep the call site a plain data pass-through
+    /// Flat parameters keep the call site a plain data pass-through
     /// (no config object threaded through the collector layer).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -172,6 +184,7 @@ impl RemoteCollector {
         host: &str,
         user: &str,
         ssh_key: Option<String>,
+        ssh_port: Option<u16>,
         connect_timeout_secs: u64,
         exec_timeout_secs: u64,
         top_n: usize,
@@ -182,6 +195,7 @@ impl RemoteCollector {
             host: host.to_string(),
             user: user.to_string(),
             ssh_key,
+            ssh_port,
             connect_timeout: Duration::from_secs(connect_timeout_secs),
             exec_timeout: Duration::from_secs(exec_timeout_secs),
             top_n,
@@ -237,12 +251,7 @@ impl RemoteCollector {
     /// `with_extras` appends the enabled extras flags (metrics runs only —
     /// process runs re-collecting them would double the remote cost).
     fn run_script(&self, with_processes: bool, with_extras: bool) -> Result<String, CollectError> {
-        // Resolve Host aliases / Port from ~/.ssh/config (ssh2 0.9 exposes
-        // no config API), so `ssh_host = "math2"` behaves like the ssh CLI.
-        let (host, port) = match ssh_config_lookup(&self.host) {
-            Some(e) => (e.host_name, e.port),
-            None => (self.host.clone(), 22),
-        };
+        let (host, port) = resolve_endpoint(&self.host, self.ssh_port);
         let addr = (host.as_str(), port)
             .to_socket_addrs()
             .map_err(|e| CollectError::Remote(format!("resolve {host}:{port}: {e}")))?
@@ -482,6 +491,17 @@ fn b64_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_entry_defaults_port_to_22_and_hostname_to_alias() {
+        let blocks = parse_ssh_config("Host plainbox\n    User nobody\n");
+        let entry = find_entry(&blocks, "plainbox").expect("alias resolves");
+        assert_eq!(entry.host_name, "plainbox");
+        assert_eq!(entry.port, 22);
+        let explicit = parse_ssh_config("Host tunbox\n    HostName 10.0.0.9\n    Port 7105\n");
+        let entry = find_entry(&explicit, "tunbox").expect("alias resolves");
+        assert_eq!((entry.host_name.as_str(), entry.port), ("10.0.0.9", 7105));
+    }
 
     #[test]
     fn parses_metrics_line_from_script() {

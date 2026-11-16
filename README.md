@@ -53,15 +53,19 @@ alias = "math2"            # unique, used in file names
 mode = "remote"            # remote | local
 ssh_host = "math2"         # required for remote (ssh config alias ok)
 ssh_user = "monitor"       # required for remote
+ssh_port = 7105            # optional; defaults to ssh config Port, else 22
 connect_timeout_secs = 5
 exec_timeout_secs = 15
 ```
 
-`ssh_host` may be an alias from `~/.ssh/config`: ivitals resolves
-`HostName`, `Port`, and `IdentityFile` from the first matching `Host`
-block (the config file is read once at startup). `ssh_user` always wins
-over a `User` line in the ssh config. Without a matching block the host
-is used literally on port 22.
+`ssh_host` may be a literal host or an alias from `~/.ssh/config`:
+ivitals resolves `HostName`, `Port`, and `IdentityFile` from the first
+matching `Host` block (the config file is read once at startup).
+`ssh_user` always wins over a `User` line in the ssh config, and an
+explicit `ssh_port` always wins over its `Port` line. Without a matching
+block the host is used literally on port 22 (or `ssh_port`). The shipped
+`config.toml` uses literal hosts so it also runs on machines without
+the same ssh config.
 
 An extras family set to `false`/`"off"` is not collected at all: no
 fields, no cost. Availability of the optional sources (NVIDIA driver,

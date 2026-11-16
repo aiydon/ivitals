@@ -17,27 +17,34 @@ net = true
 gpu_detail = "auto"
 slurm = "auto"
 
+# Remote servers use literal hosts (resolved from ~/.ssh/config on
+# 2026-11-17) so ivitals runs on machines without the same ssh config.
+# Aliases still work if present; an explicit ssh_port always wins over
+# a Port line in ~/.ssh/config. Note: the 10.16.x.x LAN IPs are only
+# reachable from within that network.
+
 [[servers]]
 alias = "math2"
 mode = "remote"
-ssh_host = "math2"
-ssh_user = "monitor"
+ssh_host = "10.16.122.147"
+ssh_user = "iydon"
 connect_timeout_secs = 5
 exec_timeout_secs = 15
 
 [[servers]]
 alias = "bot"
 mode = "remote"
-ssh_host = "bot"
-ssh_user = "monitor"
+ssh_host = "frp.iydon.top"
+ssh_user = "sinotruk"
+ssh_port = 7105
 connect_timeout_secs = 5
 exec_timeout_secs = 15
 
 [[servers]]
 alias = "amax"
 mode = "remote"
-ssh_host = "amax"
-ssh_user = "monitor"
+ssh_host = "10.16.71.12"
+ssh_user = "math"
 connect_timeout_secs = 5
 exec_timeout_secs = 15
 

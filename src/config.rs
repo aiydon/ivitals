@@ -23,6 +23,10 @@ pub struct Server {
     /// ssh-agent first, then probes ~/.ssh/id_ed25519|id_ecdsa|id_rsa.
     #[serde(default)]
     pub ssh_key: Option<String>,
+    /// Explicit SSH port. When omitted, a matching `Port` in
+    /// `~/.ssh/config` is used (if any), else 22.
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_secs: u64,
     #[serde(default = "default_exec_timeout")]
@@ -205,6 +209,9 @@ impl Config {
                 }
                 if s.ssh_user.as_deref().unwrap_or("").is_empty() {
                     bail!("remote server {} requires ssh_user", s.alias);
+                }
+                if s.ssh_port == Some(0) {
+                    bail!("remote server {} has invalid ssh_port 0", s.alias);
                 }
             }
         }
