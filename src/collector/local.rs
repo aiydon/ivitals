@@ -164,3 +164,48 @@ fn read_proc_stat(pid: Pid) -> (Option<u64>, Option<char>) {
     let cum_ms = Some(utime.saturating_add(stime) / 100 * 10);
     (cum_ms, state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CPU deltas are primed in `new()`; two metrics() calls spaced apart
+    /// must both yield valid samples without touching the process list.
+    #[test]
+    fn metrics_twice_returns_valid_samples() {
+        let mut c = LocalCollector::new("test", 5);
+        let s1 = c.metrics().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let s2 = c.metrics().unwrap();
+        assert!(s1.cpu.core_count > 0);
+        assert_eq!(s2.cpu.core_count, s1.cpu.core_count);
+        assert!((0.0..=100.0).contains(&s2.cpu.global_percent));
+        assert!(s1.memory.total_bytes > 0);
+        assert!(s1.memory.available_bytes <= s1.memory.total_bytes);
+    }
+
+    /// Snapshot is bounded by top_n, consistent with total_procs, and
+    /// sorted by cpu (then mem) descending. Called twice so the second
+    /// round carries real per-process cpu deltas.
+    #[test]
+    fn processes_snapshot_bounded_sorted_and_consistent() {
+        let mut c = LocalCollector::new("test", 5);
+        let _ = c.processes().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let snap = c.processes().unwrap();
+        assert!(!snap.processes.is_empty());
+        assert!(snap.processes.len() <= 5);
+        let total = snap.total_procs.unwrap();
+        assert!(total >= snap.processes.len());
+        for w in snap.processes.windows(2) {
+            assert!(
+                w[0].cpu_percent > w[1].cpu_percent
+                    || (w[0].cpu_percent == w[1].cpu_percent
+                        && w[0].mem_percent >= w[1].mem_percent),
+                "snapshot not sorted: {:?} before {:?}",
+                w[0].name,
+                w[1].name
+            );
+        }
+    }
+}

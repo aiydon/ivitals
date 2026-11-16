@@ -29,6 +29,11 @@ use crate::SCHEMA_VERSION;
 /// Embedded remote-side script (core fields; extras flags added later).
 const SCRIPT: &str = include_str!("scripts/collect.sh");
 
+/// Base64 of the embedded script, encoded once (the script is a compile-time
+/// constant; re-encoding 3.6 KB on every SSH tick is pure waste).
+static SCRIPT_B64: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| b64_encode(SCRIPT.as_bytes()));
+
 pub struct RemoteCollector {
     alias: String,
     host: String,
@@ -134,7 +139,7 @@ impl RemoteCollector {
         );
         let cmd = format!(
             "printf '%s' '{}' | base64 -d | bash -s -- {}",
-            b64_encode(SCRIPT.as_bytes()),
+            SCRIPT_B64.as_str(),
             args
         );
         channel
