@@ -46,6 +46,33 @@ impl NvmlProbe {
         }
     }
 
+    /// Per-GPU power draw (watts) for the `gpu_detail` extra, after
+    /// `probe()` has run for this tick. `None` when NVML is absent/error
+    /// (the `gpu_detail` field is then simply absent — never a
+    /// pseudo-zero) or when any read fails. NVML does not expose the
+    /// throttle-reason bits, so `throttle_reasons` stays `None` locally;
+    /// the remote path fills it from nvidia-smi.
+    pub fn gpu_detail_power(&mut self) -> Option<Vec<(u32, u32)>> {
+        if matches!(self.state, ProbeState::Absent | ProbeState::Error(_)) {
+            return None;
+        }
+        let nvml = self.nvml.as_ref()?;
+        // A transient failure here only degrades this tick's gpu_detail;
+        // the core probe already owns the warn.
+        let count = nvml.device_count().ok()?;
+        let mut out = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let dev = nvml.device_by_index(index).ok()?;
+            let mw = dev.power_usage().ok()?;
+            out.push((index, mw / 1000));
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
     /// Three-state GPU status for this tick. Never panics, never blocks
     /// for more than a couple of NVML calls.
     pub fn probe(&mut self) -> GpuStatus {

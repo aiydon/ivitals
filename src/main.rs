@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let mut collectors: HashMap<String, Box<dyn Collector>> = HashMap::new();
+    let extras_flags = ivitals::collector::extras::Flags::from_config(&cfg.extras);
     for server in &cfg.servers {
         match server.mode {
             Mode::Local => {
@@ -50,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
                     Box::new(LocalCollector::new(
                         &server.alias,
                         cfg.global.top_n_processes,
+                        extras_flags,
                     )),
                 );
             }
@@ -66,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
                         server.connect_timeout_secs,
                         server.exec_timeout_secs,
                         cfg.global.top_n_processes,
+                        extras_flags,
                     )),
                 );
             }

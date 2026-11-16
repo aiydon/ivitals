@@ -109,7 +109,20 @@ pub struct CpuDetail {
     pub load_avg_5m: f64,
     pub load_avg_15m: f64,
     /// Busy percent per logical core, aligned with `/proc/stat` order.
-    pub per_core_percent: Vec<f32>,
+    /// Sampled at a 60 s period (`extras::PER_CORE_PERIOD`): on a 384-core
+    /// host the full vector would add ~3.6 KB to every 5 s line. Absent on
+    /// non-sampling ticks — absence means "not sampled this tick", not zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_core_percent: Option<Vec<f32>>,
+    /// Highest per-core busy percent in the window (every tick).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_core_max_percent: Option<f32>,
+    /// 95th percentile of per-core busy percent (every tick).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_core_p95_percent: Option<f32>,
+    /// Number of cores above 50% busy (every tick).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cores_over_50: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -144,7 +157,8 @@ pub struct NetStat {
     pub rx_bytes_per_s: u64,
     pub tx_bytes_per_s: u64,
     /// TCP retransmission percent from /proc/net/snmp `Tcp:` line deltas
-    /// (RetransSegs / (OutSegs - RetransSegs)).
+    /// (delta RetransSegs / delta OutSegs; `TcpExt` is absent on some
+    /// kernels, so the coarser `Tcp:` counters are the portable source).
     pub retrans_percent: f32,
 }
 
@@ -314,7 +328,10 @@ mod tests {
                 softirq_percent: 0.5,
                 load_avg_5m: 1.0,
                 load_avg_15m: 1.0,
-                per_core_percent: vec![1.0, 2.0],
+                per_core_percent: Some(vec![1.0, 2.0]),
+                per_core_max_percent: Some(2.0),
+                per_core_p95_percent: Some(2.0),
+                cores_over_50: Some(1),
             }),
             gpu_detail: Some(vec![GpuDetail {
                 index: 0,

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+use crate::collector::extras::{self, ExtrasCollector};
 use crate::collector::nvml::NvmlProbe;
 use crate::collector::{now_ms, CollectError, Collector};
 use crate::model::{CpuInfo, Extras, MemoryInfo, MetricSample, ProcRow, ProcessSnapshot};
@@ -16,10 +17,11 @@ pub struct LocalCollector {
     top_n: usize,
     sys: System,
     nvml: NvmlProbe,
+    extras: ExtrasCollector,
 }
 
 impl LocalCollector {
-    pub fn new(alias: &str, top_n: usize) -> Self {
+    pub fn new(alias: &str, top_n: usize, extras_flags: extras::Flags) -> Self {
         let mut sys = System::new();
         // Prime the CPU delta baseline and memory counters so the first
         // tick already carries meaningful values.
@@ -30,6 +32,7 @@ impl LocalCollector {
             top_n,
             sys,
             nvml: NvmlProbe::new(),
+            extras: ExtrasCollector::new(extras_flags),
         }
     }
 }
@@ -50,13 +53,26 @@ impl Collector for LocalCollector {
         let load_avg_1m = read_loadavg()?.0;
         let total_bytes = self.sys.total_memory();
         let available_bytes = self.sys.available_memory();
+        let gpu = self.nvml.probe();
+        let core_ms = t0.elapsed().as_millis() as u32;
+
+        // Extras run after the core fields so `collect_ms` stays a
+        // core-only number; `extras_ms` is reported separately inside
+        // the sample.
+        let extras_data = self.extras.collect_local(
+            self.nvml
+                .gpu_detail_power()
+                .and_then(|p| extras::gpu_detail::from_nvml_power(&p)),
+        );
+        let mut sample_extras = Extras::default();
+        extras_data.apply(&mut sample_extras);
 
         Ok(MetricSample {
             schema_version: SCHEMA_VERSION,
             ts_ms: now_ms(),
             server: self.alias.clone(),
             mode: "local",
-            collect_ms: t0.elapsed().as_millis() as u32,
+            collect_ms: core_ms,
             cpu: CpuInfo {
                 global_percent,
                 core_count,
@@ -67,8 +83,8 @@ impl Collector for LocalCollector {
                 used_bytes: total_bytes.saturating_sub(available_bytes),
                 available_bytes,
             },
-            gpu: self.nvml.probe(),
-            extras: Extras::default(),
+            gpu,
+            extras: sample_extras,
         })
     }
 
@@ -175,7 +191,7 @@ mod tests {
     /// must both yield valid samples without touching the process list.
     #[test]
     fn metrics_twice_returns_valid_samples() {
-        let mut c = LocalCollector::new("test", 5);
+        let mut c = LocalCollector::new("test", 5, extras::Flags::default());
         let s1 = c.metrics().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let s2 = c.metrics().unwrap();
@@ -191,7 +207,7 @@ mod tests {
     /// round carries real per-process cpu deltas.
     #[test]
     fn processes_snapshot_bounded_sorted_and_consistent() {
-        let mut c = LocalCollector::new("test", 5);
+        let mut c = LocalCollector::new("test", 5, extras::Flags::default());
         let _ = c.processes().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
         let snap = c.processes().unwrap();

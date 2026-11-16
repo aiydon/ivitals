@@ -159,6 +159,20 @@ impl Scheduler {
                                     self.slow_threshold
                                 );
                             }
+                            if let Record::Metrics(sample) = &rec {
+                                if let Some(ms) = sample.extras.extras_ms {
+                                    if u64::from(ms) > 20
+                                        && self.rate.should_warn(
+                                            &format!("extras_slow:{alias}"),
+                                            WARN_WINDOW,
+                                        )
+                                    {
+                                        log::warn!(
+                                            "extras collection for {alias} took {ms} ms (> 20 ms budget; consider moving a family to lower cadence)"
+                                        );
+                                    }
+                                }
+                            }
                             if let Err(e) = self.tx.send(rec) {
                                 if self.rate.should_warn(&format!("sink:{alias}"), WARN_WINDOW) {
                                     log::error!("storage channel closed, record dropped: {e}");

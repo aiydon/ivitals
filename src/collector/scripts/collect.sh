@@ -6,8 +6,11 @@
 # so the script body never passes through shell quoting.
 #
 # Output (stdout):
-#   line 1: metrics JSON (core schema, no extras yet)
+#   line 1: metrics JSON (core schema)
 #   line 2: processes JSON (only with --processes)
+#   then, for enabled extras families (metrics runs only): one
+#   "## <section>" header line followed by the raw source text; the
+#   Rust side parses the sections with the same parsers it uses locally.
 #
 # Pseudo-value policy: an unavailable metric omits its field entirely.
 # GPU: no nvidia-smi -> absent; nvidia-smi present but failing -> error.
@@ -16,12 +19,25 @@ set -u
 ALIAS=""
 TOPN=20
 EMIT_PROCESSES=0
+EX_CPU=0
+EX_MEM=0
+EX_DISK=0
+EX_NET=0
+EX_GPU=0
+EX_SLURM=0
+EX_PSI=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --alias) ALIAS="${2:-}"; shift 2 ;;
     --topn) TOPN="${2:-20}"; shift 2 ;;
     --processes) EMIT_PROCESSES=1; shift ;;
-    --extras) shift 2 ;;
+    --cpu-detail) EX_CPU=1; shift ;;
+    --memory-detail) EX_MEM=1; shift ;;
+    --disk-io) EX_DISK=1; shift ;;
+    --net) EX_NET=1; shift ;;
+    --gpu-detail) EX_GPU=1; shift ;;
+    --slurm) EX_SLURM=1; shift ;;
+    --psi) EX_PSI=1; shift ;;
     *) shift ;;
   esac
 done
@@ -89,3 +105,60 @@ if [ "$EMIT_PROCESSES" = "1" ]; then
   }')
   printf '{"top_n":%s,"total_procs":%s,"processes":[%s]}\n' "$TOPN" "$TOTAL" "$ROWS"
 fi
+
+# ---------- extras sections (metrics runs only) ----------
+# Each enabled family emits a "## <name>" header plus raw source text.
+# A header with empty content means "source missing on this host"; the
+# Rust parser treats that identically to a missing section (field absent).
+if [ "$EX_CPU" = 1 ] || [ "$EX_MEM" = 1 ] || [ "$EX_DISK" = 1 ] || \
+   [ "$EX_NET" = 1 ] || [ "$EX_PSI" = 1 ] || [ "$EX_GPU" = 1 ] || [ "$EX_SLURM" = 1 ]; then
+  echo ""
+  if [ "$EX_CPU" = 1 ]; then
+    echo "## cpu_detail"
+    cat /proc/stat 2>/dev/null
+    echo "#loadavg"
+    cat /proc/loadavg 2>/dev/null
+  fi
+  if [ "$EX_MEM" = 1 ]; then
+    echo "## memory_detail"
+    cat /proc/meminfo 2>/dev/null
+    echo "#vmstat"
+    grep -E '^(oom_kill|pswpin|pswpout) ' /proc/vmstat 2>/dev/null
+  fi
+  if [ "$EX_DISK" = 1 ]; then
+    echo "## diskstats"
+    cat /proc/diskstats 2>/dev/null
+  fi
+  if [ "$EX_NET" = 1 ]; then
+    echo "## net"
+    cat /proc/net/dev 2>/dev/null
+    echo "#snmp_tcp"
+    grep -A1 '^Tcp:' /proc/net/snmp 2>/dev/null
+  fi
+  if [ "$EX_PSI" = 1 ]; then
+    if [ -r /proc/pressure/cpu ]; then
+      echo "## psi_cpu"
+      cat /proc/pressure/cpu 2>/dev/null
+    fi
+    if [ -r /proc/pressure/memory ]; then
+      echo "## psi_mem"
+      cat /proc/pressure/memory 2>/dev/null
+    fi
+    if [ -r /proc/pressure/io ]; then
+      echo "## psi_io"
+      cat /proc/pressure/io 2>/dev/null
+    fi
+  fi
+  if [ "$EX_GPU" = 1 ] && command -v nvidia-smi >/dev/null 2>&1; then
+    echo "## gpu_detail"
+    nvidia-smi --query-gpu=index,power.draw,clocks_throttle_reasons_active \
+      --format=csv,noheader,nounits 2>/dev/null || true
+  fi
+  if [ "$EX_SLURM" = 1 ] && command -v sinfo >/dev/null 2>&1; then
+    echo "## slurm_nodes"
+    sinfo -N -h -o '%T %c %C %G' 2>/dev/null || true
+    echo "## slurm_jobs"
+    squeue -h -o '%t' 2>/dev/null || true
+  fi
+fi
+exit 0

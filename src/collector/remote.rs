@@ -20,13 +20,15 @@ use std::time::Duration;
 
 use ssh2::Session;
 
+use crate::collector::extras::{self, ExtrasCollector};
 use crate::collector::{now_ms, CollectError, Collector};
 use crate::model::{
     CpuInfo, Extras, GpuStatus, MemoryInfo, MetricSample, ProcRow, ProcessSnapshot,
 };
 use crate::SCHEMA_VERSION;
 
-/// Embedded remote-side script (core fields; extras flags added later).
+/// Embedded remote-side script; the extras section block is gated by the
+/// flags passed per run (metrics runs only).
 const SCRIPT: &str = include_str!("scripts/collect.sh");
 
 /// Base64 of the embedded script, encoded once (the script is a compile-time
@@ -42,9 +44,15 @@ pub struct RemoteCollector {
     connect_timeout: Duration,
     exec_timeout: Duration,
     top_n: usize,
+    extras: ExtrasCollector,
+    /// Script flags for the enabled extras families, built once.
+    extras_args: String,
 }
 
 impl RemoteCollector {
+    /// Eight flat parameters keep the call site a plain data pass-through
+    /// (no config object threaded through the collector layer).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         alias: &str,
         host: &str,
@@ -53,6 +61,7 @@ impl RemoteCollector {
         connect_timeout_secs: u64,
         exec_timeout_secs: u64,
         top_n: usize,
+        extras_flags: extras::Flags,
     ) -> Self {
         Self {
             alias: alias.to_string(),
@@ -62,6 +71,8 @@ impl RemoteCollector {
             connect_timeout: Duration::from_secs(connect_timeout_secs),
             exec_timeout: Duration::from_secs(exec_timeout_secs),
             top_n,
+            extras: ExtrasCollector::new(extras_flags),
+            extras_args: build_extras_args(&extras_flags),
         }
     }
 
@@ -99,13 +110,11 @@ impl RemoteCollector {
         )))
     }
 
-    /// One SSH round-trip executing the embedded script.
-    /// Returns the parsed core sample plus the process snapshot when
-    /// `with_processes`.
-    fn run_script(
-        &self,
-        with_processes: bool,
-    ) -> Result<(MetricSample, Option<ProcessSnapshot>), CollectError> {
+    /// One SSH round-trip executing the embedded script; returns the raw
+    /// stdout (JSON lines, then the optional `## section` extras block).
+    /// `with_extras` appends the enabled extras flags (metrics runs only —
+    /// process runs re-collecting them would double the remote cost).
+    fn run_script(&self, with_processes: bool, with_extras: bool) -> Result<String, CollectError> {
         let addr = format!("{}:22", self.host);
         let tcp = TcpStream::connect_timeout(
             &addr
@@ -131,12 +140,14 @@ impl RemoteCollector {
             .channel_session()
             .map_err(|e| CollectError::Remote(format!("channel: {e}")))?;
 
-        let args = format!(
-            "--alias {} --topn {}{}",
-            self.alias,
-            self.top_n,
-            if with_processes { " --processes" } else { "" }
-        );
+        let mut args = format!("--alias {} --topn {}", self.alias, self.top_n);
+        if with_processes {
+            args.push_str(" --processes");
+        }
+        if with_extras && !self.extras_args.is_empty() {
+            args.push(' ');
+            args.push_str(&self.extras_args);
+        }
         let cmd = format!(
             "printf '%s' '{}' | base64 -d | bash -s -- {}",
             SCRIPT_B64.as_str(),
@@ -151,32 +162,98 @@ impl RemoteCollector {
             .read_to_string(&mut out)
             .map_err(|e| CollectError::Remote(format!("read: {e}")))?;
 
-        let mut lines = out.lines();
-        let metrics_line = lines
-            .next()
-            .filter(|l| !l.trim().is_empty())
-            .ok_or_else(|| CollectError::Parse("empty remote stdout".into()))?;
-        let sample = parse_metrics_line(metrics_line, &self.alias)?;
-
-        let snapshot = lines
-            .next()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| parse_process_line(l, &self.alias))
-            .transpose()?;
-
-        Ok((sample, snapshot))
+        Ok(out)
     }
+}
+
+/// Splits the script output into (JSON record lines, extras sections).
+/// Sections start at a `## <name>` header line and continue until the
+/// next header; JSON records are the non-empty lines before any header
+/// (the script emits the metrics line first, then optionally the
+/// processes line, then the section block).
+fn split_output(out: &str) -> (Vec<String>, extras::Sections) {
+    let mut json = Vec::new();
+    let mut sections = extras::Sections::new();
+    let mut current: Option<String> = None;
+    for line in out.lines() {
+        if let Some(name) = line.strip_prefix("## ") {
+            current = Some(name.trim().to_string());
+            continue;
+        }
+        match &current {
+            Some(name) => {
+                let e = sections.entry(name.clone()).or_default();
+                e.push_str(line);
+                e.push('\n');
+            }
+            None => {
+                if !line.trim().is_empty() {
+                    json.push(line.to_string());
+                }
+            }
+        }
+    }
+    (json, sections)
+}
+
+/// Builds the script flag string for the enabled extras families.
+fn build_extras_args(f: &extras::Flags) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if f.cpu_detail {
+        parts.push("--cpu-detail");
+    }
+    if f.memory_detail {
+        parts.push("--memory-detail");
+    }
+    if f.disk_io {
+        parts.push("--disk-io");
+    }
+    if f.net {
+        parts.push("--net");
+    }
+    if f.gpu_detail {
+        parts.push("--gpu-detail");
+    }
+    if f.slurm {
+        parts.push("--slurm");
+    }
+    if f.psi {
+        parts.push("--psi");
+    }
+    parts.join(" ")
 }
 
 impl Collector for RemoteCollector {
     fn metrics(&mut self) -> Result<MetricSample, CollectError> {
-        let (sample, _) = self.run_script(false)?;
+        let out = self.run_script(false, true)?;
+        let (json, sections) = split_output(&out);
+        let line = json
+            .first()
+            .ok_or_else(|| CollectError::Parse("empty remote stdout".into()))?;
+        let mut sample = parse_metrics_line(line, &self.alias)?;
+        // gpu_detail / slurm sections are pre-parsed here (fixed formats),
+        // the rest flow through the shared ExtrasCollector pipeline.
+        let gpu = sections
+            .get("gpu_detail")
+            .and_then(|t| extras::gpu_detail::parse(t));
+        let slurm = match (sections.get("slurm_nodes"), sections.get("slurm_jobs")) {
+            (Some(nodes), Some(jobs)) => extras::slurm::parse(&format!("{nodes}\n#jobs\n{jobs}")),
+            _ => None,
+        };
+        let data = self.extras.collect_remote(&sections, gpu, slurm);
+        data.apply(&mut sample.extras);
         Ok(sample)
     }
 
     fn processes(&mut self) -> Result<ProcessSnapshot, CollectError> {
-        let (_, snapshot) = self.run_script(true)?;
-        snapshot.ok_or_else(|| CollectError::Parse("remote: no process line".into()))
+        let out = self.run_script(true, false)?;
+        let (json, _sections) = split_output(&out);
+        // The script always emits the core metrics line first; the
+        // processes line is second.
+        let line = json
+            .get(1)
+            .ok_or_else(|| CollectError::Parse("remote: no process line".into()))?;
+        parse_process_line(line, &self.alias)
     }
 }
 

@@ -83,6 +83,9 @@ pub struct ExtrasConfig {
     pub net: bool,
     pub gpu_detail: GpuDetailMode,
     pub slurm: SlurmMode,
+    /// Pressure-Stall-Information flat keys (psi_*_some), from
+    /// /proc/pressure/{cpu,memory,io}.
+    pub psi: bool,
 }
 
 impl Default for ExtrasConfig {
@@ -94,6 +97,7 @@ impl Default for ExtrasConfig {
             net: true,
             gpu_detail: GpuDetailMode::Auto,
             slurm: SlurmMode::Auto,
+            psi: true,
         }
     }
 }

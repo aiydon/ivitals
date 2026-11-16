@@ -1,5 +1,6 @@
 //! Collectors: one per configured server, local or remote.
 
+pub mod extras;
 pub mod local;
 pub mod nvml;
 pub mod remote;
