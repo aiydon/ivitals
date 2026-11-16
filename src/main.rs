@@ -30,17 +30,11 @@ async fn main() -> anyhow::Result<()> {
         cfg.global.data_dir,
     );
 
-    // Storage channel. For now a counting placeholder drains it; the
-    // single-writer disk thread replaces this (storage module).
+    // Storage channel + single writer thread: appends JSONL under
+    // data/{YYYY-MM-DD}/{alias}-{kind}.jsonl, flushes on 30s/200-record
+    // cadence and on channel close (Ctrl-C).
     let (tx, rx) = mpsc::channel::<Record>();
-    std::thread::spawn(move || {
-        let mut n = 0u64;
-        for rec in rx {
-            n += 1;
-            log::debug!("record buffered #{n} ({})", rec.kind());
-        }
-        log::info!("record channel closed, {n} records seen");
-    });
+    let writer = ivitals::storage::spawn_writer(rx, cfg.global.data_dir.clone().into());
 
     let mut collectors: HashMap<String, Box<dyn Collector>> = HashMap::new();
     for server in &cfg.servers {
@@ -78,7 +72,10 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::signal::ctrl_c().await?;
     log::info!("ctrl-c: shutting down");
-    sched_task.abort();
+    sched_task.abort(); // drops the channel sender; writer drains and flushes
+    if let Err(e) = writer.join() {
+        log::error!("writer thread ended abnormally: {e:?}");
+    }
     Ok(())
 }
 

@@ -223,7 +223,8 @@ pub struct ProcRow {
 ///
 /// The metrics variant is boxed: it is ~4x larger than the processes
 /// variant, and channel messages should not pay that size on every send.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
 pub enum Record {
     Metrics(Box<MetricSample>),
     Processes(ProcessSnapshot),
