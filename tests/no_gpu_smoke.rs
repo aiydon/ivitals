@@ -31,7 +31,7 @@ fn no_gpu_run_is_stable_and_absent() {
     std::fs::write(
         &cfg_path,
         format!(
-            "schema_version = 1\n\
+            "schema_version = 2\n\
              [global]\n\
              interval_secs = 2\n\
              process_interval_secs = 4\n\

@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.global.data_dir.clone().into(),
         // day count; u64 -> u32 is a no-op for any sane config
         cfg.global.retention_days as u32,
-    );
+    )?;
 
     let mut collectors: HashMap<String, Box<dyn Collector>> = HashMap::new();
     let extras_flags = ivitals::collector::extras::Flags::from_config(&cfg.extras);
@@ -79,11 +79,30 @@ async fn main() -> anyhow::Result<()> {
     let sched = Scheduler::new(&cfg, collectors, tx);
     let sched_task = tokio::spawn(async move { sched.run().await });
 
-    tokio::signal::ctrl_c().await?;
-    log::info!("ctrl-c: shutting down");
-    sched_task.abort(); // drops the channel sender; writer drains and flushes
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let mut fatal: Option<String> = None;
+    loop {
+        tokio::select! {
+            signal = &mut ctrl_c => {
+                signal?;
+                log::info!("ctrl-c: shutting down");
+                break;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                if writer.is_finished() {
+                    fatal = Some("storage writer terminated; stopping to avoid silent data loss".into());
+                    break;
+                }
+            }
+        }
+    }
+    sched_task.abort(); // drops every sender; writer drains and flushes
     if let Err(e) = writer.join() {
         log::error!("writer thread ended abnormally: {e:?}");
+    }
+    if let Some(message) = fatal {
+        anyhow::bail!("{message}");
     }
     Ok(())
 }

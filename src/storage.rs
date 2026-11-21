@@ -68,7 +68,25 @@ pub fn prune(
     retention_days: u32,
     now: DateTime<Utc>,
 ) -> io::Result<u32> {
+    prune_excluding(
+        data_dir,
+        retention_days,
+        now,
+        &std::collections::HashSet::new(),
+    )
+}
+
+/// Same as [`prune`], but never removes an open date directory or today's
+/// directory. The writer owns those files; unlinking them on Linux would
+/// keep the fd valid but make the data disappear on restart.
+pub fn prune_excluding(
+    data_dir: &std::path::Path,
+    retention_days: u32,
+    now: DateTime<Utc>,
+    skip: &std::collections::HashSet<String>,
+) -> io::Result<u32> {
     let cutoff = now.date_naive() - chrono::Duration::days(retention_days as i64);
+    let today = now.date_naive().format("%Y-%m-%d").to_string();
     let mut removed = 0u32;
     if !data_dir.exists() {
         return Ok(0);
@@ -80,7 +98,8 @@ pub fn prune(
         let Some(date) = parse_date_dir(&name) else {
             continue;
         };
-        if date < cutoff && entry.path().is_dir() {
+        if date < cutoff && name != today && !skip.contains(name.as_ref()) && entry.path().is_dir()
+        {
             match fs::remove_dir_all(entry.path()) {
                 Ok(()) => {
                     removed += 1;
@@ -107,6 +126,7 @@ struct Storage {
     since_flush: Instant,
     unflushed: u64,
     fail_streak: u32,
+    flush_fail_streak: u32,
 }
 
 impl Storage {
@@ -118,11 +138,14 @@ impl Storage {
             since_flush: Instant::now(),
             unflushed: 0,
             fail_streak: 0,
+            flush_fail_streak: 0,
         }
     }
 
     fn prune(&self) {
-        if let Err(e) = prune(&self.data_dir, self.retention_days, Utc::now()) {
+        let open: std::collections::HashSet<String> =
+            self.files.values().map(|f| f.date.clone()).collect();
+        if let Err(e) = prune_excluding(&self.data_dir, self.retention_days, Utc::now(), &open) {
             log::warn!("retention prune failed: {e}");
         }
     }
@@ -147,7 +170,18 @@ impl Storage {
             None => true,
         };
         if stale {
-            // Drop closes (and flushes) the old day's file.
+            // Flush explicitly: BufWriter's Drop ignores errors, and a
+            // failed flush at midnight must not silently lose the tail of
+            // the old day's file.
+            if let Some(old) = self.files.get_mut(&key) {
+                if let Err(error) = old.writer.flush() {
+                    log::error!(
+                        "flush before day roll failed for {alias}-{kind} ({}): {error}",
+                        old.date
+                    );
+                    return Err(error);
+                }
+            }
             self.files.remove(&key);
             fs::create_dir_all(self.data_dir.join(date))?;
             let f = File::options()
@@ -162,7 +196,11 @@ impl Storage {
                 },
             );
         }
-        Ok(&mut self.files.get_mut(&key).unwrap().writer)
+        let entry = self
+            .files
+            .get_mut(&key)
+            .ok_or_else(|| io::Error::other("storage file entry missing after open"))?;
+        Ok(&mut entry.writer)
     }
 
     fn write(&mut self, rec: &Record) -> io::Result<()> {
@@ -176,19 +214,29 @@ impl Storage {
         f.write_all(line.as_bytes())?;
         self.unflushed += 1;
         if self.unflushed >= FLUSH_RECORDS {
-            self.flush_all();
+            self.flush_all()?;
         }
         Ok(())
     }
 
-    fn flush_all(&mut self) {
+    fn flush_all(&mut self) -> io::Result<()> {
+        let mut first_error = None;
         for (alias, f) in self.files.iter_mut() {
             if let Err(e) = f.writer.flush() {
                 log::error!("flush failed for {alias:?}: {e}");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
         }
+        if let Some(error) = first_error {
+            self.flush_fail_streak += 1;
+            return Err(error);
+        }
+        self.flush_fail_streak = 0;
         self.since_flush = Instant::now();
         self.unflushed = 0;
+        Ok(())
     }
 }
 
@@ -220,7 +268,19 @@ fn run(rx: mpsc::Receiver<Record>, data_dir: PathBuf, retention_days: u32) {
             Err(mpsc::RecvTimeoutError::Disconnected) => break 'drain,
         }
         if store.since_flush.elapsed() >= FLUSH_INTERVAL {
-            store.flush_all();
+            if let Err(e) = store.flush_all() {
+                log::error!(
+                    "periodic flush failed ({}/{} in a row): {e}",
+                    store.flush_fail_streak,
+                    MAX_CONSECUTIVE_FAILURES
+                );
+                if store.flush_fail_streak >= MAX_CONSECUTIVE_FAILURES {
+                    log::error!(
+                        "giving up on storage after {MAX_CONSECUTIVE_FAILURES} consecutive flush failures"
+                    );
+                    break 'drain;
+                }
+            }
         }
         if last_prune.elapsed() >= PRUNE_INTERVAL {
             last_prune = Instant::now();
@@ -228,7 +288,9 @@ fn run(rx: mpsc::Receiver<Record>, data_dir: PathBuf, retention_days: u32) {
         }
     }
     // Final drain: flush everything so the last line on disk is complete.
-    store.flush_all();
+    if let Err(e) = store.flush_all() {
+        log::error!("final flush failed: {e}");
+    }
 }
 
 /// Spawns the writer thread. `rx` is the receiver half of the storage
@@ -237,11 +299,10 @@ pub fn spawn_writer(
     rx: mpsc::Receiver<Record>,
     data_dir: PathBuf,
     retention_days: u32,
-) -> JoinHandle<()> {
+) -> io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("ivitals-writer".into())
         .spawn(move || run(rx, data_dir, retention_days))
-        .expect("failed to spawn writer thread")
 }
 
 #[cfg(test)]
@@ -296,15 +357,62 @@ mod tests {
             collect_ms: 1,
             top_n: 5,
             total_procs: Some(1),
+            total_threads: Some(1),
+            state_counts: None,
+            gpu_processes: None,
             processes: vec![ProcRow {
                 pid: 1,
                 name: "init".into(),
+                user: Some("root".into()),
+                uid: Some(0),
+                gid: Some(0),
+                ppid: Some(0),
+                parent_name: None,
+                cmdline: Some("/sbin/init".into()),
+                cwd: Some("/".into()),
+                exe: Some("/sbin/init".into()),
                 cpu_percent: 0.5,
                 mem_percent: 0.1,
+                rss_bytes: Some(4096),
+                threads: Some(1),
+                start_time_ms: Some(0),
                 cum_cpu_ms: Some(10),
                 state: Some('S'),
             }],
         }
+    }
+
+    #[test]
+    fn writer_host_info_kind() {
+        let dir = std::env::temp_dir().join(format!("ivitals-host-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (tx, rx) = mpsc::channel();
+        let handle = spawn_writer(rx, dir.clone(), 30).unwrap();
+        tx.send(Record::HostInfo(crate::model::HostInfo {
+            schema_version: SCHEMA_VERSION,
+            ts_ms: 1_794_821_040_000,
+            server: "math2".into(),
+            mode: "remote",
+            hostname: Some("math2".into()),
+            os: Some("Linux".into()),
+            kernel: Some("6.1".into()),
+            arch: Some("x86_64".into()),
+            cpu_model: Some("EPYC".into()),
+            core_count: 64,
+            mem_total_bytes: 1_000,
+            boot_time_ms: Some(0),
+            uptime_secs: Some(1),
+            gpu_models: Some(vec!["L20".into()]),
+        }))
+        .unwrap();
+        drop(tx);
+        handle.join().unwrap();
+        let path = dir.join("2026-11-16").join("math2-host.jsonl");
+        let text = fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(value["hostname"], "math2");
+        assert_eq!(value["core_count"], 64);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// End-to-end writer contract: records land in
@@ -317,7 +425,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_writer(rx, dir.clone(), 30);
+        let handle = spawn_writer(rx, dir.clone(), 30).unwrap();
         // Day 2026-11-16 (UTC)
         tx.send(Record::Metrics(Box::new(sample(
             "math2",
@@ -384,7 +492,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         let (tx, rx) = mpsc::channel();
-        let handle = spawn_writer(rx, dir.clone(), 30);
+        let handle = spawn_writer(rx, dir.clone(), 30).unwrap();
         tx.send(Record::Metrics(Box::new(sample("a", 1_794_821_040_000))))
             .unwrap(); // d1
         tx.send(Record::Metrics(Box::new(sample("a", 1_794_873_601_000))))
@@ -412,6 +520,27 @@ mod tests {
     /// Retention policy: whole expired date dirs are removed; the boundary
     /// day (exactly `retention_days` old) is kept; non-date dirs, invalid
     /// dates and stray files are never touched.
+    #[test]
+    fn prune_skips_today_and_open_dates() {
+        let dir = std::env::temp_dir().join(format!("ivitals-prune-skip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["2020-01-01", "2026-10-16", "2026-11-16"] {
+            fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut skip = std::collections::HashSet::new();
+        skip.insert("2020-01-01".to_string());
+        let removed = prune_excluding(&dir, 30, now, &skip).unwrap();
+        assert_eq!(removed, 1); // only 2026-10-16
+        assert!(dir.join("2020-01-01").exists());
+        assert!(!dir.join("2026-10-16").exists());
+        assert!(dir.join("2026-11-16").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn prune_removes_only_expired_date_dirs() {
         let dir = std::env::temp_dir().join(format!("ivitals-prune-{}", std::process::id()));

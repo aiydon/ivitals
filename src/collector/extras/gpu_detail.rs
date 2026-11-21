@@ -1,39 +1,54 @@
 //! `gpu_detail` extra: per-GPU efficiency/power fields.
 //!
-//! Remote side: `nvidia-smi --query-gpu=index,power.draw,clocks_throttle_reasons_active
-//! --format=csv,noheader,nounits` — one line per GPU. Power parses as a
-//! fractional watt value; the throttle string is `"[Not Active]"` when
-//! nothing is throttling (-> `None`, absence not a pseudo-value).
+//! Remote side: `nvidia-smi --query-gpu=index,power.draw,fan.speed,clocks.sm,
+//! clocks.mem,pstate,clocks_throttle_reasons_active --format=csv,noheader,
+//! nounits` — one line per GPU. Throttle text is last and itself contains
+//! commas, so only the first six commas split fields. Malformed lines are
+//! skipped instead of discarding the whole family.
 //!
 //! The four DCGM-only fields (sm_active / sm_occupancy / dram_active /
-//! tensor_active) stay `None` in v1 on every host: DCGM is absent on all
-//! four hosts (see docs/metrics-research.md §6), and their DCGM metric
-//! IDs are pinned in that report for the v2 dcgmi probe.
-//!
-//! Local side: the NVML probe supplies power directly (no subprocess);
-//! throttle reason bits are not exposed by NVML cleanly, so local
-//! `throttle_reasons` is `None`.
+//! tensor_active) stay `None` until DCGM is probed; NVML only exposes
+//! utilization, not SM occupancy.
 
 use crate::model::GpuDetail;
 
-/// Parses nvidia-smi CSV lines `index,power_w,throttle_reasons`. The
-/// throttle string itself contains commas (`"SW Power Cap, SW Thermal"`),
-/// so only the first two commas split fields; the rest is throttle text.
+fn optional_u32(field: &str) -> Option<u32> {
+    field.trim().parse::<f64>().ok().map(|v| v.round() as u32)
+}
+
+fn optional_text(field: &str) -> Option<String> {
+    let s = field.trim();
+    if s.is_empty() || s == "[N/A]" || s == "N/A" {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// Parses `index,power,fan,sm_clock,mem_clock,pstate,throttle_reasons`.
 pub fn parse(text: &str) -> Option<Vec<GpuDetail>> {
     let mut out = Vec::new();
     for line in text.lines() {
-        let mut parts = line.splitn(3, ',');
+        let mut parts = line.splitn(7, ',');
         let Some(index_s) = parts.next() else {
             continue;
         };
-        let Some(power_s) = parts.next() else {
+        let Ok(index) = index_s.trim().parse::<u32>() else {
             continue;
         };
-        let index: u32 = index_s.trim().parse().ok()?;
-        let power_w: Option<u32> = power_s.trim().parse::<f64>().ok().map(|w| w.round() as u32);
+        let power_w = parts.next().and_then(optional_u32);
+        let fan_percent = parts.next().and_then(optional_u32);
+        let sm_clock_mhz = parts.next().and_then(optional_u32);
+        let mem_clock_mhz = parts.next().and_then(optional_u32);
+        let pstate = parts.next().and_then(optional_text);
         let throttle = parts.next().and_then(|s| {
             let s = s.trim();
-            if s.is_empty() || s == "[Not Active]" || s == "Not Active" {
+            let inactive = s.is_empty()
+                || s == "[Not Active]"
+                || s == "Not Active"
+                || s == "N/A"
+                || s.starts_with("0x0000000000000000");
+            if inactive {
                 None
             } else {
                 Some(
@@ -51,6 +66,10 @@ pub fn parse(text: &str) -> Option<Vec<GpuDetail>> {
             dram_active: None,
             tensor_active: None,
             power_w,
+            fan_percent,
+            sm_clock_mhz,
+            mem_clock_mhz,
+            pstate,
             throttle_reasons: throttle,
         });
     }
@@ -72,6 +91,10 @@ pub fn from_nvml_power(powers: &[(u32, u32)]) -> Option<Vec<GpuDetail>> {
             dram_active: None,
             tensor_active: None,
             power_w: Some(*w),
+            fan_percent: None,
+            sm_clock_mhz: None,
+            mem_clock_mhz: None,
+            pstate: None,
             throttle_reasons: None,
         })
         .collect();
@@ -88,18 +111,30 @@ mod tests {
 
     #[test]
     fn parses_csv_lines() {
-        let text = "0, 45.2, [Not Active]\n1, 12.0, [SW Power Cap, SW Thermal]\n";
+        let text =
+            "0, 45.2, 30, 1800, 7000, P2, [Not Active]\n1, 12.0, [N/A], 900, 5000, P8, [SW Power Cap, SW Thermal]\n";
         let v = parse(text).unwrap();
         assert_eq!(v.len(), 2);
         assert_eq!(v[0].index, 0);
         assert_eq!(v[0].power_w, Some(45));
+        assert_eq!(v[0].fan_percent, Some(30));
+        assert_eq!(v[0].sm_clock_mhz, Some(1800));
+        assert_eq!(v[0].mem_clock_mhz, Some(7000));
+        assert_eq!(v[0].pstate.as_deref(), Some("P2"));
         assert!(v[0].throttle_reasons.is_none());
-        assert_eq!(v[0].sm_active, None);
-        assert_eq!(v[1].power_w, Some(12));
+        assert_eq!(v[1].fan_percent, None);
+        assert_eq!(v[1].pstate.as_deref(), Some("P8"));
         assert_eq!(
             v[1].throttle_reasons.as_deref(),
             Some("SW Power Cap, SW Thermal")
         );
+    }
+
+    #[test]
+    fn skips_bad_line_without_dropping_good_rows() {
+        let v = parse("garbage\n0, 45.2, 30, 1800, 7000, P2, [Not Active]\n").unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].index, 0);
     }
 
     #[test]

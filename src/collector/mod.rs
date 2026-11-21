@@ -5,7 +5,7 @@ pub mod local;
 pub mod nvml;
 pub mod remote;
 
-use crate::model::{MetricSample, ProcessSnapshot};
+use crate::model::{HostInfo, MetricSample, ProcessSnapshot};
 
 /// Error types for a single collection attempt. A failure never takes the
 /// daemon down: the scheduler logs (rate-limited) and skips the tick for
@@ -41,6 +41,10 @@ impl From<std::io::Error> for CollectError {
 pub trait Collector: Send {
     fn metrics(&mut self) -> Result<MetricSample, CollectError>;
     fn processes(&mut self) -> Result<ProcessSnapshot, CollectError>;
+    /// Optional one-time identity record. Default: not supported.
+    fn host_info(&mut self) -> Option<HostInfo> {
+        None
+    }
 }
 
 /// Milliseconds since the Unix epoch.

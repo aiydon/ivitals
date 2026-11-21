@@ -23,6 +23,7 @@ const ALL_FLAGS: Flags = Flags {
     gpu_detail: true,
     slurm: true,
     psi: true,
+    fs_space: true,
 };
 
 fn sample_with(extras: Extras) -> MetricSample {
@@ -207,7 +208,12 @@ fn net_aggregate_excludes_loop_and_clamps() {
         net::NetRaw {
             dev: dev
                 .iter()
-                .map(|(n, r, t)| (n.to_string(), *r, *t))
+                .map(|(n, r, t)| net::NetIface {
+                    name: n.to_string(),
+                    rx_bytes: *r,
+                    tx_bytes: *t,
+                    ..Default::default()
+                })
                 .collect(),
             tcp,
         }

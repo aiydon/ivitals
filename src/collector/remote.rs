@@ -14,8 +14,9 @@
 //!   first, then the optional `ssh_key` file, then default `~/.ssh/id_*`
 //!   (BatchMode semantics).
 
+use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use ssh2::Session;
@@ -23,9 +24,12 @@ use ssh2::Session;
 use crate::collector::extras::{self, ExtrasCollector};
 use crate::collector::{now_ms, CollectError, Collector};
 use crate::model::{
-    CpuInfo, Extras, GpuStatus, MemoryInfo, MetricSample, ProcRow, ProcessSnapshot,
+    CpuInfo, Extras, GpuProcess, GpuStatus, HostInfo, MemoryInfo, MetricSample, ProcRow,
+    ProcessSnapshot,
 };
 use crate::SCHEMA_VERSION;
+
+const MAX_REMOTE_OUTPUT: u64 = 16 * 1024 * 1024;
 
 /// Embedded remote-side script; the extras section block is gated by the
 /// flags passed per run (metrics runs only).
@@ -250,13 +254,14 @@ impl RemoteCollector {
     /// stdout (JSON lines, then the optional `## section` extras block).
     /// `with_extras` appends the enabled extras flags (metrics runs only —
     /// process runs re-collecting them would double the remote cost).
-    fn run_script(&self, with_processes: bool, with_extras: bool) -> Result<String, CollectError> {
+    fn run_script(
+        &self,
+        with_processes: bool,
+        with_extras: bool,
+        with_host: bool,
+    ) -> Result<String, CollectError> {
         let (host, port) = resolve_endpoint(&self.host, self.ssh_port);
-        let addr = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|e| CollectError::Remote(format!("resolve {host}:{port}: {e}")))?
-            .next()
-            .ok_or_else(|| CollectError::Remote(format!("resolve {host}:{port}: no addresses")))?;
+        let addr = resolve_host(&host, port, self.connect_timeout)?;
         let tcp = TcpStream::connect_timeout(&addr, self.connect_timeout)
             .map_err(|e| CollectError::Remote(format!("connect {addr}: {e}")))?;
         tcp.set_nodelay(true).ok();
@@ -284,6 +289,9 @@ impl RemoteCollector {
             args.push(' ');
             args.push_str(&self.extras_args);
         }
+        if with_host {
+            args.push_str(" --host");
+        }
         let cmd = format!(
             "printf '%s' '{}' | base64 -d | bash -s -- {}",
             SCRIPT_B64.as_str(),
@@ -294,11 +302,54 @@ impl RemoteCollector {
             .map_err(|e| CollectError::Remote(format!("exec: {e}")))?;
 
         let mut out = String::new();
-        channel
-            .read_to_string(&mut out)
-            .map_err(|e| CollectError::Remote(format!("read: {e}")))?;
+        {
+            let mut limited = (&mut channel).take(MAX_REMOTE_OUTPUT);
+            limited
+                .read_to_string(&mut out)
+                .map_err(|e| CollectError::Remote(format!("read: {e}")))?;
+        }
+        if out.len() as u64 >= MAX_REMOTE_OUTPUT {
+            return Err(CollectError::Remote(format!(
+                "stdout exceeded {MAX_REMOTE_OUTPUT} bytes; refusing to parse a truncated record"
+            )));
+        }
+        match channel.exit_status() {
+            Ok(0) | Err(_) => {}
+            Ok(code) => {
+                let mut err = String::new();
+                let stderr = channel.stderr();
+                let _ = stderr.take(4096).read_to_string(&mut err);
+                return Err(CollectError::Remote(format!(
+                    "remote script exited with status {code}: {}",
+                    truncate(err.trim(), 300)
+                )));
+            }
+        }
 
         Ok(out)
+    }
+}
+
+/// Resolve `host:port` in a helper thread so a stuck resolver cannot hold
+/// a blocking pool thread forever, regardless of platform resolver support.
+fn resolve_host(host: &str, port: u16, timeout: Duration) -> Result<SocketAddr, CollectError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let lookup_host = host.to_string();
+    std::thread::spawn(move || {
+        let result = (lookup_host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|e| e.to_string())
+            .and_then(|mut addrs| addrs.next().ok_or_else(|| "no addresses".to_string()));
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(addr)) => Ok(addr),
+        Ok(Err(error)) => Err(CollectError::Remote(format!(
+            "resolve {host}:{port}: {error}"
+        ))),
+        Err(_) => Err(CollectError::Remote(format!(
+            "resolve {host}:{port}: timeout after {timeout:?}"
+        ))),
     }
 }
 
@@ -356,12 +407,15 @@ fn build_extras_args(f: &extras::Flags) -> String {
     if f.psi {
         parts.push("--psi");
     }
+    if f.fs_space {
+        parts.push("--fs");
+    }
     parts.join(" ")
 }
 
 impl Collector for RemoteCollector {
     fn metrics(&mut self) -> Result<MetricSample, CollectError> {
-        let out = self.run_script(false, true)?;
+        let out = self.run_script(false, true, false)?;
         let (json, sections) = split_output(&out);
         let line = json
             .first()
@@ -369,20 +423,29 @@ impl Collector for RemoteCollector {
         let mut sample = parse_metrics_line(line, &self.alias)?;
         // gpu_detail / slurm sections are pre-parsed here (fixed formats),
         // the rest flow through the shared ExtrasCollector pipeline.
-        let gpu = sections
-            .get("gpu_detail")
-            .and_then(|t| extras::gpu_detail::parse(t));
+        let gpu_section = sections.get("gpu_detail");
+        let gpu = gpu_section.and_then(|t| extras::gpu_detail::parse(t));
         let slurm = match (sections.get("slurm_nodes"), sections.get("slurm_jobs")) {
             (Some(nodes), Some(jobs)) => extras::slurm::parse(&format!("{nodes}\n#jobs\n{jobs}")),
             _ => None,
         };
-        let data = self.extras.collect_remote(&sections, gpu, slurm);
+        let gpu_failed = gpu.is_none() && gpu_section.is_some_and(|t| !t.trim().is_empty());
+        let mut data = self.extras.collect_remote(&sections, gpu, slurm);
+        if gpu_failed {
+            data.parse_errors += 1;
+        }
         data.apply(&mut sample.extras);
         Ok(sample)
     }
 
+    fn host_info(&mut self) -> Option<HostInfo> {
+        let out = self.run_script(false, false, true).ok()?;
+        let (_json, sections) = split_output(&out);
+        parse_host_section(sections.get("host")?, &self.alias)
+    }
+
     fn processes(&mut self) -> Result<ProcessSnapshot, CollectError> {
-        let out = self.run_script(true, false)?;
+        let out = self.run_script(true, false, false)?;
         let (json, _sections) = split_output(&out);
         // The script always emits the core metrics line first; the
         // processes line is second.
@@ -391,6 +454,52 @@ impl Collector for RemoteCollector {
             .ok_or_else(|| CollectError::Parse("remote: no process line".into()))?;
         parse_process_line(line, &self.alias)
     }
+}
+
+fn parse_host_section(text: &str, alias: &str) -> Option<HostInfo> {
+    let mut fields = BTreeMap::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        fields.insert(key.trim().to_string(), value.trim().to_string());
+    }
+    if fields.is_empty() {
+        return None;
+    }
+    let ts_ms = now_ms();
+    let uptime_secs = fields
+        .get("uptime_secs")
+        .and_then(|v| v.parse::<u64>().ok());
+    let gpu_models = fields.get("gpu_models").map(|v| {
+        v.split('|')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    Some(HostInfo {
+        schema_version: SCHEMA_VERSION,
+        ts_ms,
+        server: alias.to_string(),
+        mode: "remote",
+        hostname: fields.get("hostname").cloned().filter(|s| !s.is_empty()),
+        os: fields.get("os").cloned().filter(|s| !s.is_empty()),
+        kernel: fields.get("kernel").cloned().filter(|s| !s.is_empty()),
+        arch: fields.get("arch").cloned().filter(|s| !s.is_empty()),
+        cpu_model: fields.get("cpu_model").cloned().filter(|s| !s.is_empty()),
+        core_count: fields
+            .get("core_count")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        mem_total_bytes: fields
+            .get("mem_total_bytes")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        boot_time_ms: uptime_secs.map(|up| ts_ms.saturating_sub((up as i64) * 1000)),
+        uptime_secs,
+        gpu_models: gpu_models.filter(|v| !v.is_empty()),
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -407,8 +516,22 @@ struct RemoteMetricsLine {
 
 #[derive(serde::Deserialize)]
 struct RemoteProcessLine {
+    #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
+    ts_ms: Option<i64>,
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    collect_ms: Option<u32>,
     top_n: usize,
     total_procs: usize,
+    #[serde(default)]
+    total_threads: Option<u64>,
+    #[serde(default)]
+    state_counts: Option<BTreeMap<String, u32>>,
+    #[serde(default)]
+    gpu_processes: Option<Vec<GpuProcess>>,
     processes: Vec<ProcRow>,
 }
 
@@ -444,22 +567,28 @@ fn parse_process_line(line: &str, alias: &str) -> Result<ProcessSnapshot, Collec
         CollectError::Parse(format!("processes: {e} (line: {})", truncate(line, 200)))
     })?;
     Ok(ProcessSnapshot {
-        schema_version: SCHEMA_VERSION,
-        ts_ms: now_ms(),
-        server: alias.to_string(),
+        schema_version: raw.schema_version.unwrap_or(SCHEMA_VERSION),
+        ts_ms: raw.ts_ms.unwrap_or_else(now_ms),
+        server: raw
+            .server
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| alias.to_string()),
         mode: "remote",
-        collect_ms: 0,
+        collect_ms: raw.collect_ms.unwrap_or(0),
         top_n: raw.top_n,
         total_procs: Some(raw.total_procs),
+        total_threads: raw.total_threads,
+        state_counts: raw.state_counts,
+        gpu_processes: raw.gpu_processes,
         processes: raw.processes,
     })
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        format!("{}…", s.chars().take(max).collect::<String>())
     }
 }
 
@@ -506,7 +635,7 @@ mod tests {
     #[test]
     fn parses_metrics_line_from_script() {
         // Exact shape emitted by scripts/collect.sh (core fields only).
-        let line = r#"{"schema_version":1,"ts_ms":1794817677936,"server":"test","mode":"remote","collect_ms":225,"cpu":{"global_percent":9.6,"core_count":16,"load_avg_1m":1.89},"memory":{"total_bytes":16089788416,"used_bytes":10493288448,"available_bytes":5596499968},"gpu":{"state":"absent"}}"#;
+        let line = r#"{"schema_version":2,"ts_ms":1794817677936,"server":"test","mode":"remote","collect_ms":225,"cpu":{"global_percent":9.6,"core_count":16,"load_avg_1m":1.89},"memory":{"total_bytes":16089788416,"used_bytes":10493288448,"available_bytes":5596499968},"gpu":{"state":"absent"}}"#;
         let sample = parse_metrics_line(line, "test").unwrap();
         assert_eq!(sample.server, "test");
         assert_eq!(sample.mode, "remote");
@@ -519,7 +648,7 @@ mod tests {
 
     #[test]
     fn parses_gpu_ok_line() {
-        let line = r#"{"schema_version":1,"ts_ms":1,"server":"math2","mode":"remote","collect_ms":30,"cpu":{"global_percent":1.0,"core_count":384,"load_avg_1m":1.0},"memory":{"total_bytes":100,"used_bytes":50,"available_bytes":50},"gpu":{"state":"ok","gpus":[{"index":0,"name":"NVIDIA L20","util_percent":19,"mem_used_mb":469,"mem_total_mb":46068,"temp_c":43.0}]}}"#;
+        let line = r#"{"schema_version":2,"ts_ms":1,"server":"math2","mode":"remote","collect_ms":30,"cpu":{"global_percent":1.0,"core_count":384,"load_avg_1m":1.0},"memory":{"total_bytes":100,"used_bytes":50,"available_bytes":50},"gpu":{"state":"ok","gpus":[{"index":0,"name":"NVIDIA L20","util_percent":19,"mem_used_mb":469,"mem_total_mb":46068,"temp_c":43.0}]}}"#;
         let sample = parse_metrics_line(line, "math2").unwrap();
         match sample.gpu {
             GpuStatus::Ok { gpus } => {
@@ -545,11 +674,20 @@ mod tests {
     fn rejects_garbage() {
         assert!(parse_metrics_line("nonsense", "x").is_err());
         assert!(parse_metrics_line(
-            r#"{"schema_version":1,"ts_ms":1,"server":"x","mode":"local","collect_ms":1,"cpu":{"global_percent":1.0,"core_count":1,"load_avg_1m":1.0},"memory":{"total_bytes":1,"used_bytes":1,"available_bytes":0},"gpu":{"state":"absent"}}"#,
+            r#"{"schema_version":2,"ts_ms":1,"server":"x","mode":"local","collect_ms":1,"cpu":{"global_percent":1.0,"core_count":1,"load_avg_1m":1.0},"memory":{"total_bytes":1,"used_bytes":1,"available_bytes":0},"gpu":{"state":"absent"}}"#,
             "x"
         )
         .is_err()); // wrong mode
         assert!(parse_process_line("{}", "x").is_err());
+    }
+
+    #[test]
+    fn truncate_never_splits_utf8() {
+        let text = "数据".repeat(200);
+        let out = truncate(&text, 10);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 11);
+        assert!(out.starts_with('数'));
     }
 
     #[test]

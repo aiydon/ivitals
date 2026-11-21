@@ -20,10 +20,12 @@ pub struct MemRaw {
     pub vmstat: HashMap<String, u64>,
 }
 
-const MEMINFO_KEYS: [&str; 6] = [
+const MEMINFO_KEYS: [&str; 8] = [
     "Buffers",
     "Cached",
     "SReclaimable",
+    "Dirty",
+    "Writeback",
     "SwapTotal",
     "SwapFree",
     "MemTotal",
@@ -122,6 +124,11 @@ pub fn compute(prev: &MemRaw, cur: &MemRaw, window: f64) -> Option<MemoryDetail>
 
     Some(MemoryDetail {
         cache_bytes: cache_kb * 1024,
+        buffers_bytes: get(&cur.meminfo, "Buffers").unwrap_or(0) * 1024,
+        slab_bytes: get(&cur.meminfo, "SReclaimable").unwrap_or(0) * 1024,
+        dirty_bytes: get(&cur.meminfo, "Dirty").unwrap_or(0) * 1024,
+        writeback_bytes: get(&cur.meminfo, "Writeback").unwrap_or(0) * 1024,
+        swap_total_bytes: swap_total * 1024,
         swap_used_bytes: swap_total.saturating_sub(swap_free) * 1024,
         swap_in_bytes_per_s: (delta(pswpin, p_pswpin) / window * PAGE_BYTES as f64) as u64,
         swap_out_bytes_per_s: (delta(pswpout, p_pswpout) / window * PAGE_BYTES as f64) as u64,

@@ -67,6 +67,22 @@ pub struct GpuSummary {
     pub mem_used_mb: u64,
     pub mem_total_mb: u64,
     pub temp_c: f32,
+    /// used / total, computed by the collector so every consumer agrees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_util_percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_w: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_limit_w: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_percent: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sm_clock_mhz: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_clock_mhz: Option<u32>,
+    /// NVML performance state (`P0`..`P15`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pstate: Option<String>,
 }
 
 /// Flattened extended metrics. Each field is either present with real data
@@ -89,10 +105,17 @@ pub struct Extras {
     pub gpu_detail: Option<Vec<GpuDetail>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slurm: Option<SlurmStat>,
+    /// Mounted filesystem capacity/usage (local disks, network mounts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filesystems: Option<Vec<Filesystem>>,
     /// Extras collection cost in ms; a flat convenience metric so the
     /// sampling cadence of each category can be tuned from data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extras_ms: Option<u32>,
+    /// Number of enabled extras that had non-empty input but failed to
+    /// parse this tick. 0/omitted means no parser regression.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extras_errors: Option<u32>,
     /// Free-form flat metrics found during research (e.g. `psi_cpu_some`).
     /// Keys must be flat snake_case names.
     #[serde(flatten, skip_serializing_if = "BTreeMap::is_empty")]
@@ -109,11 +132,16 @@ pub struct CpuDetail {
     pub load_avg_5m: f64,
     pub load_avg_15m: f64,
     /// Busy percent per logical core, aligned with `/proc/stat` order.
-    /// Sampled at a 60 s period (`extras::PER_CORE_PERIOD`): on a 384-core
-    /// host the full vector would add ~3.6 KB to every 5 s line. Absent on
-    /// non-sampling ticks — absence means "not sampled this tick", not zero.
+    /// Recorded on every tick now; values are rounded to 2 decimals to keep
+    /// the line compact on 384-core hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_core_percent: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_core_min_percent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_core_mean_percent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_core_p50_percent: Option<f32>,
     /// Highest per-core busy percent in the window (every tick).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub per_core_max_percent: Option<f32>,
@@ -123,12 +151,24 @@ pub struct CpuDetail {
     /// Number of cores above 50% busy (every tick).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cores_over_50: Option<u32>,
+    /// Number of cores above 90% busy (every tick).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cores_over_90: Option<u32>,
+    /// Ten 10%-wide buckets (0-10, ..., 90-100), every tick. Cheap
+    /// distribution summary independent of the per-core vector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub busy_histogram: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct MemoryDetail {
-    /// Page cache (`Cached` in /proc/meminfo).
+    /// Page cache + buffers + reclaimable slab.
     pub cache_bytes: u64,
+    pub buffers_bytes: u64,
+    pub slab_bytes: u64,
+    pub dirty_bytes: u64,
+    pub writeback_bytes: u64,
+    pub swap_total_bytes: u64,
     pub swap_used_bytes: u64,
     /// From /proc/vmstat pswpin/pswpout deltas.
     pub swap_in_bytes_per_s: u64,
@@ -151,7 +191,7 @@ pub struct DiskIo {
     pub iops: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NetStat {
     /// All interfaces except loopback, from /proc/net/dev deltas.
     pub rx_bytes_per_s: u64,
@@ -160,6 +200,35 @@ pub struct NetStat {
     /// (delta RetransSegs / delta OutSegs; `TcpExt` is absent on some
     /// kernels, so the coarser `Tcp:` counters are the portable source).
     pub retrans_percent: f32,
+    /// Per-interface rates, sorted by traffic descending in the collector.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<NetInterface>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct NetInterface {
+    pub name: String,
+    pub rx_bytes_per_s: u64,
+    pub tx_bytes_per_s: u64,
+    pub rx_packets_per_s: u64,
+    pub tx_packets_per_s: u64,
+    pub rx_errors_per_s: f64,
+    pub tx_errors_per_s: f64,
+    pub rx_drops_per_s: f64,
+    pub tx_drops_per_s: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Filesystem {
+    pub device: String,
+    pub mount: String,
+    pub fstype: String,
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+    pub available_bytes: u64,
+    pub used_percent: f32,
+    pub inodes_total: u64,
+    pub inodes_free: u64,
 }
 
 /// Per-GPU efficiency fields. NVML-only fields (power) fill in without any
@@ -178,6 +247,14 @@ pub struct GpuDetail {
     pub tensor_active: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub power_w: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fan_percent: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sm_clock_mhz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_clock_mhz: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pstate: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub throttle_reasons: Option<String>,
 }
@@ -213,6 +290,13 @@ pub struct ProcessSnapshot {
     pub top_n: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_procs: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_threads: Option<u64>,
+    /// Process counts by state char (R/S/D/Z/T/...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_counts: Option<BTreeMap<String, u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_processes: Option<Vec<GpuProcess>>,
     pub processes: Vec<ProcRow>,
 }
 
@@ -220,8 +304,32 @@ pub struct ProcessSnapshot {
 pub struct ProcRow {
     pub pid: u32,
     pub name: String,
+    /// Real user who owns the process (name resolved locally when possible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ppid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_name: Option<String>,
+    /// NUL-separated `/proc/[pid]/cmdline`, joined with spaces and bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmdline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
     pub cpu_percent: f32,
     pub mem_percent: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time_ms: Option<i64>,
     /// Cumulative CPU time (user+system) since process start, from
     /// /proc/[pid]/stat (local) or `ps -o time` (remote).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,6 +338,54 @@ pub struct ProcRow {
     /// D (uninterruptible sleep) and Z (zombie) are the interesting ones.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<char>,
+}
+
+/// One process holding GPU memory (compute/graphics), from NVML or
+/// `nvidia-smi --query-compute-apps`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct GpuProcess {
+    pub gpu_index: u32,
+    /// GPU UUID when the source exposes it (remote nvidia-smi).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_uuid: Option<String>,
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mem_mb: Option<u64>,
+    /// "compute" | "graphics"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+/// One-time (per run/day) host identity record, written to
+/// `{alias}-host.jsonl`. It answers "what machine produced these metrics"
+/// without repeating long strings on every 5 s line.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostInfo {
+    pub schema_version: u32,
+    pub ts_ms: i64,
+    pub server: String,
+    pub mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_model: Option<String>,
+    pub core_count: usize,
+    pub mem_total_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_time_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<u64>,
+    /// GPU model names (no per-tick data; live values stay in `gpu.gpus`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_models: Option<Vec<String>>,
 }
 
 /// Routing envelope for the storage channel: one collected record headed to
@@ -242,6 +398,7 @@ pub struct ProcRow {
 pub enum Record {
     Metrics(Box<MetricSample>),
     Processes(ProcessSnapshot),
+    HostInfo(HostInfo),
 }
 
 impl Record {
@@ -250,6 +407,7 @@ impl Record {
         match self {
             Record::Metrics(_) => "metrics",
             Record::Processes(_) => "processes",
+            Record::HostInfo(_) => "host",
         }
     }
 
@@ -257,6 +415,7 @@ impl Record {
         match self {
             Record::Metrics(s) => &s.server,
             Record::Processes(p) => &p.server,
+            Record::HostInfo(h) => &h.server,
         }
     }
 
@@ -264,6 +423,7 @@ impl Record {
         match self {
             Record::Metrics(s) => s.ts_ms,
             Record::Processes(p) => p.ts_ms,
+            Record::HostInfo(h) => h.ts_ms,
         }
     }
 }
@@ -305,7 +465,9 @@ mod tests {
             "net",
             "gpu_detail",
             "slurm",
+            "filesystems",
             "extras_ms",
+            "extras_errors",
             "extras",
         ] {
             assert!(v.get(key).is_none(), "unexpected key {key}");
@@ -329,9 +491,14 @@ mod tests {
                 load_avg_5m: 1.0,
                 load_avg_15m: 1.0,
                 per_core_percent: Some(vec![1.0, 2.0]),
+                per_core_min_percent: Some(1.0),
+                per_core_mean_percent: Some(1.5),
+                per_core_p50_percent: Some(1.5),
                 per_core_max_percent: Some(2.0),
                 per_core_p95_percent: Some(2.0),
                 cores_over_50: Some(1),
+                cores_over_90: Some(0),
+                busy_histogram: Some(vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
             }),
             gpu_detail: Some(vec![GpuDetail {
                 index: 0,
@@ -340,6 +507,10 @@ mod tests {
                 dram_active: None,
                 tensor_active: None,
                 power_w: Some(120),
+                fan_percent: None,
+                sm_clock_mhz: None,
+                mem_clock_mhz: None,
+                pstate: None,
                 throttle_reasons: None,
             }]),
             extra,
@@ -374,6 +545,13 @@ mod tests {
                     mem_used_mb: 469,
                     mem_total_mb: 46068,
                     temp_c: 43.0,
+                    mem_util_percent: Some(1.0),
+                    power_w: None,
+                    power_limit_w: None,
+                    fan_percent: None,
+                    sm_clock_mhz: None,
+                    mem_clock_mhz: None,
+                    pstate: None,
                 }],
             })
             .unwrap(),

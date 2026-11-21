@@ -1,6 +1,7 @@
 //! Local collector: sysinfo for core metrics, /proc for the cheap extras
 //! (load average, per-process state and cumulative CPU time).
 
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
@@ -8,7 +9,9 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use crate::collector::extras::{self, ExtrasCollector};
 use crate::collector::nvml::NvmlProbe;
 use crate::collector::{now_ms, CollectError, Collector};
-use crate::model::{CpuInfo, Extras, MemoryInfo, MetricSample, ProcRow, ProcessSnapshot};
+use crate::model::{
+    CpuInfo, Extras, GpuStatus, HostInfo, MemoryInfo, MetricSample, ProcRow, ProcessSnapshot,
+};
 use crate::SCHEMA_VERSION;
 
 /// Collects metrics from the machine ivitals runs on.
@@ -18,6 +21,7 @@ pub struct LocalCollector {
     sys: System,
     nvml: NvmlProbe,
     extras: ExtrasCollector,
+    users: HashMap<u32, String>,
 }
 
 impl LocalCollector {
@@ -33,6 +37,7 @@ impl LocalCollector {
             sys,
             nvml: NvmlProbe::new(),
             extras: ExtrasCollector::new(extras_flags),
+            users: load_users(),
         }
     }
 }
@@ -53,17 +58,14 @@ impl Collector for LocalCollector {
         let load_avg_1m = read_loadavg()?.0;
         let total_bytes = self.sys.total_memory();
         let available_bytes = self.sys.available_memory();
-        let gpu = self.nvml.probe();
+        let gpu_snapshot = self.nvml.sample();
+        let gpu = gpu_snapshot.status.unwrap_or(GpuStatus::Absent);
         let core_ms = t0.elapsed().as_millis() as u32;
 
         // Extras run after the core fields so `collect_ms` stays a
         // core-only number; `extras_ms` is reported separately inside
         // the sample.
-        let extras_data = self.extras.collect_local(
-            self.nvml
-                .gpu_detail_power()
-                .and_then(|p| extras::gpu_detail::from_nvml_power(&p)),
-        );
+        let extras_data = self.extras.collect_local(gpu_snapshot.details);
         let mut sample_extras = Extras::default();
         extras_data.apply(&mut sample_extras);
 
@@ -88,6 +90,56 @@ impl Collector for LocalCollector {
         })
     }
 
+    fn host_info(&mut self) -> Option<HostInfo> {
+        let hostname = read_trim("/etc/hostname");
+        let os = std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("PRETTY_NAME="))
+                    .map(|v| v.trim_matches('"').to_string())
+            });
+        let cpu_model = std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("model name").map(|_| line))
+                    .and_then(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()))
+            });
+        let uptime_secs = std::fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|text| text.split_whitespace().next()?.parse::<f64>().ok())
+            .map(|v| v as u64);
+        let ts_ms = now_ms();
+        let gpu_models = match self.nvml.sample().status {
+            Some(GpuStatus::Ok { gpus }) => {
+                let names: Vec<String> = gpus.into_iter().map(|gpu| gpu.name).collect();
+                if names.is_empty() {
+                    None
+                } else {
+                    Some(names)
+                }
+            }
+            _ => None,
+        };
+        Some(HostInfo {
+            schema_version: SCHEMA_VERSION,
+            ts_ms,
+            server: self.alias.clone(),
+            mode: "local",
+            hostname,
+            os,
+            kernel: read_trim("/proc/sys/kernel/osrelease"),
+            arch: Some(std::env::consts::ARCH.to_string()),
+            cpu_model,
+            core_count: self.sys.cpus().len(),
+            mem_total_bytes: self.sys.total_memory(),
+            boot_time_ms: uptime_secs.map(|up| ts_ms.saturating_sub((up as i64) * 1000)),
+            uptime_secs,
+            gpu_models,
+        })
+    }
+
     fn processes(&mut self) -> Result<ProcessSnapshot, CollectError> {
         let t0 = Instant::now();
         // Refresh only what ProcRow needs; everything else stays cached.
@@ -97,6 +149,12 @@ impl Collector for LocalCollector {
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
         let total_mem = self.sys.total_memory();
+        let mut total_threads = 0u64;
+        let mut state_counts: BTreeMap<String, u32> = BTreeMap::new();
+        for p in self.sys.processes().values() {
+            total_threads += p.tasks().map(|t| t.len() as u64 + 1).unwrap_or(1);
+            *state_counts.entry(state_char(p.status())).or_default() += 1;
+        }
         let mut ranked: Vec<(f32, &sysinfo::Process)> = self
             .sys
             .processes()
@@ -116,15 +174,38 @@ impl Collector for LocalCollector {
             .map(|(_, p)| {
                 let pid = p.pid();
                 let (cum_cpu_ms, state) = read_proc_stat(pid);
+                let meta = read_proc_meta(pid);
+                let user = meta.uid.map(|uid| {
+                    self.users
+                        .get(&uid)
+                        .cloned()
+                        .unwrap_or_else(|| uid.to_string())
+                });
+                let parent_name = meta.ppid.and_then(|ppid| {
+                    self.sys
+                        .process(Pid::from_u32(ppid))
+                        .map(|parent| parent.name().to_string_lossy().into_owned())
+                });
                 ProcRow {
                     pid: pid.as_u32(),
                     name: p.name().to_string_lossy().into_owned(),
+                    user,
+                    uid: meta.uid,
+                    gid: meta.gid,
+                    ppid: meta.ppid,
+                    parent_name,
+                    cmdline: meta.cmdline,
+                    cwd: meta.cwd,
+                    exe: meta.exe,
                     cpu_percent: p.cpu_usage(),
                     mem_percent: if total_mem > 0 {
                         p.memory() as f32 / total_mem as f32 * 100.0
                     } else {
                         0.0
                     },
+                    rss_bytes: Some(p.memory()),
+                    threads: Some(p.tasks().map(|t| t.len() as u32 + 1).unwrap_or(1)),
+                    start_time_ms: Some((p.start_time() as i64).saturating_mul(1000)),
                     cum_cpu_ms,
                     state,
                 }
@@ -138,9 +219,119 @@ impl Collector for LocalCollector {
             collect_ms: t0.elapsed().as_millis() as u32,
             top_n: self.top_n,
             total_procs: Some(total),
+            total_threads: Some(total_threads),
+            state_counts: Some(state_counts),
+            gpu_processes: self.nvml.gpu_processes(),
             processes,
         })
     }
+}
+
+struct ProcMeta {
+    uid: Option<u32>,
+    gid: Option<u32>,
+    ppid: Option<u32>,
+    cmdline: Option<String>,
+    cwd: Option<String>,
+    exe: Option<String>,
+}
+
+fn truncate_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        format!("{}…", text.chars().take(max).collect::<String>())
+    }
+}
+
+fn load_users() -> HashMap<u32, String> {
+    let mut users = HashMap::new();
+    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+        for line in passwd.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() >= 3 {
+                if let Ok(uid) = fields[2].parse::<u32>() {
+                    users.entry(uid).or_insert_with(|| fields[0].to_string());
+                }
+            }
+        }
+    }
+    users
+}
+
+fn read_proc_meta(pid: Pid) -> ProcMeta {
+    let mut uid = None;
+    let mut gid = None;
+    let mut ppid = None;
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        for line in status.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let first = value
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u32>().ok());
+            match key {
+                "Uid" => uid = first,
+                "Gid" => gid = first,
+                "PPid" => ppid = first,
+                _ => {}
+            }
+        }
+    }
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .and_then(|bytes| {
+            let text = String::from_utf8_lossy(&bytes).replace('\0', " ");
+            let text = text.trim();
+            if text.is_empty() {
+                None
+            } else {
+                Some(truncate_text(text, 512))
+            }
+        });
+    let cwd = std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|path| truncate_text(&path.to_string_lossy(), 256));
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|path| truncate_text(&path.to_string_lossy(), 256));
+    ProcMeta {
+        uid,
+        gid,
+        ppid,
+        cmdline,
+        cwd,
+        exe,
+    }
+}
+
+fn state_char(status: sysinfo::ProcessStatus) -> String {
+    use sysinfo::ProcessStatus as S;
+    match status {
+        S::Idle => "I",
+        S::Run => "R",
+        S::Sleep => "S",
+        S::Stop => "T",
+        S::Zombie => "Z",
+        S::Tracing => "t",
+        S::Dead => "X",
+        S::UninterruptibleDiskSleep => "D",
+        S::Parked => "P",
+        S::LockBlocked => "L",
+        S::Wakekill => "K",
+        S::Waking => "W",
+        _ => "?",
+    }
+    .to_string()
+}
+
+fn read_trim(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 /// (load1, load5, load15) from /proc/loadavg.

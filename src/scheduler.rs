@@ -1,34 +1,31 @@
-//! Tick loop: drives every configured collector in parallel via
-//! `spawn_blocking` and feeds successful records into the storage channel.
+//! Per-server tick loops: each configured host runs in its own task with
+//! its own interval, so a slow SSH host can no longer delay collection
+//! from the others (the previous implementation awaited every server's
+//! blocking task in one round).
 //!
-//! Guarantees (per the goal spec):
-//! - one slow server never blocks the others (independent blocking tasks);
-//! - a collection exceeding `interval / 2` triggers a warn, rate-limited to
-//!   once per alias per 60 s;
-//! - a failed collection (unreachable host, bad JSON, ...) triggers a warn,
-//!   rate-limited the same way; the tick for that server is skipped —
-//!   nothing is written, no pseudo-values;
-//! - process snapshots run only on ticks aligned to
-//!   `process_interval_secs` (alignment survives non-divisible intervals);
-//! - missed ticks are skipped (`MissedTickBehavior::Skip`): after a long
-//!   stall we resample rather than replay a backlog.
+//! Guarantees:
+//! - one collector task per alias, driven by an independent interval;
+//! - missed ticks are skipped (`MissedTickBehavior::Skip`), never replayed;
+//! - collection errors are rate-limited per alias + kind, and the tick is
+//!   skipped (no pseudo-values);
+//! - a panicking collector disables only that alias, with an error log;
+//! - process snapshots follow `process_interval_secs` alignment;
+//! - the storage sender is cloned per task; when `run` is aborted the
+//!   JoinSet drops and aborts all tasks, closing every sender.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use tokio::task::JoinSet;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::collector::{CollectError, Collector};
+use crate::collector::Collector;
 use crate::config::Config;
 use crate::model::Record;
 
-/// One in-flight collection: the handle over the blocking task and the
-/// collector it moved (re-inserted into the map on return).
-type RoundTask =
-    tokio::task::JoinHandle<(Result<Record, CollectError>, Duration, Box<dyn Collector>)>;
-
 const WARN_WINDOW: Duration = Duration::from_secs(60);
+const HOST_REFRESH_SECS: u64 = 86_400;
 
 /// Per-key warn throttling.
 #[derive(Default)]
@@ -51,26 +48,12 @@ impl RateLimiter {
 }
 
 pub struct Scheduler {
-    interval: Duration,
+    tick_period: Duration,
     process_interval: Duration,
     slow_threshold: Duration,
-    /// Configured servers, in config order (stable iteration).
     servers: Vec<crate::config::Server>,
-    /// One long-lived collector per alias; reused across ticks so sysinfo
-    /// CPU deltas and the NVML handle stay warm. A round borrows each
-    /// entry `&mut` for the duration of its blocking task.
     collectors: HashMap<String, Box<dyn Collector>>,
-    /// Aliases whose collector task panicked: skipped (rate-limited error)
-    /// for the rest of the run. A panic here means a collector bug, not an
-    /// input condition; the daemon must not die with them.
-    dead: Vec<String>,
     tx: mpsc::Sender<Record>,
-    rate: RateLimiter,
-    /// Elapsed and next-due process-snapshot times, in accumulated tick
-    /// seconds, so 5s/60s alignment holds even when the interval does not
-    /// divide the process interval.
-    tick_seconds: u64,
-    next_process_at: u64,
 }
 
 impl Scheduler {
@@ -79,118 +62,181 @@ impl Scheduler {
         collectors: HashMap<String, Box<dyn Collector>>,
         tx: mpsc::Sender<Record>,
     ) -> Self {
-        let interval = Duration::from_secs(cfg.global.interval_secs);
-        let process_interval = Duration::from_secs(cfg.global.process_interval_secs);
-        let servers = cfg.servers.clone();
+        let tick_period = Duration::from_secs(cfg.global.interval_secs);
         Self {
-            interval,
-            process_interval,
-            slow_threshold: interval / 2,
-            servers,
+            tick_period,
+            process_interval: Duration::from_secs(cfg.global.process_interval_secs),
+            slow_threshold: tick_period / 2,
+            servers: cfg.servers.clone(),
             collectors,
-            dead: Vec::new(),
             tx,
-            rate: RateLimiter::default(),
-            tick_seconds: 0,
-            next_process_at: 0,
         }
     }
 
-    /// Runs until the task is aborted; then drop the storage sender so the
-    /// writer thread flushes and exits.
+    /// Spawns one independent loop per server and joins them. Aborting the
+    /// supervisor aborts the whole JoinSet, which drops every sender clone.
     pub async fn run(mut self) {
-        let mut tick = interval(self.interval);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        loop {
-            tick.tick().await;
-            self.tick_seconds += self.interval.as_secs();
-            let with_processes = self.tick_seconds >= self.next_process_at;
-            if with_processes {
-                self.next_process_at += self.process_interval.as_secs();
-            }
-            self.collect_round(false).await;
-            if with_processes {
-                self.collect_round(true).await;
+        let mut tasks = JoinSet::new();
+        for server in std::mem::take(&mut self.servers) {
+            let Some(collector) = self.collectors.remove(&server.alias) else {
+                continue;
+            };
+            let tx = self.tx.clone();
+            let tick_period = self.tick_period;
+            let process_interval = self.process_interval;
+            let slow_threshold = self.slow_threshold;
+            let alias = server.alias.clone();
+            tasks.spawn(async move {
+                run_server(
+                    alias,
+                    collector,
+                    tx,
+                    tick_period,
+                    process_interval,
+                    slow_threshold,
+                )
+                .await;
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                log::error!("collector task ended abnormally: {error}");
             }
         }
     }
+}
 
-    /// One round over all live servers: `metrics` or `processes`.
-    ///
-    /// Each collector is `remove`d from the map and moved into its blocking
-    /// task (a `&mut` cannot cross `spawn_blocking`), then re-inserted on
-    /// return. The map entry is absent for the duration of the round, which
-    /// is fine: each alias is driven by exactly one task.
-    async fn collect_round(&mut self, processes: bool) {
-        let label = if processes { "processes" } else { "metrics" };
-        let pending: Vec<(&String, RoundTask)> = self
-            .servers
-            .iter()
-            .filter(|s| !self.dead.contains(&s.alias))
-            .filter_map(|s| {
-                let mut col = self.collectors.remove(&s.alias)?;
-                Some((
-                    &s.alias,
-                    tokio::task::spawn_blocking(move || {
-                        let t0 = Instant::now();
-                        let res = if processes {
-                            col.processes().map(Record::Processes)
-                        } else {
-                            col.metrics()
-                                .map(|sample| Record::Metrics(Box::new(sample)))
-                        };
-                        (res, t0.elapsed(), col)
-                    }),
-                ))
+async fn run_server(
+    alias: String,
+    mut collector: Box<dyn Collector>,
+    tx: mpsc::Sender<Record>,
+    tick_period: Duration,
+    process_interval: Duration,
+    slow_threshold: Duration,
+) {
+    let mut rate = RateLimiter::default();
+    let mut tick = interval(tick_period);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut tick_seconds = 0u64;
+    let mut next_process_at = 0u64;
+    let mut next_host_at = 0u64;
+
+    loop {
+        tick.tick().await;
+        tick_seconds += tick_period.as_secs();
+
+        if tick_seconds >= next_host_at {
+            next_host_at += HOST_REFRESH_SECS;
+            let (host, returned) = match tokio::task::spawn_blocking(move || {
+                let host = collector.host_info();
+                (host, collector)
             })
-            .collect();
+            .await
+            {
+                Ok(pair) => pair,
+                Err(error) => {
+                    log::error!("host probe for {alias} panicked: {error}; server disabled");
+                    return;
+                }
+            };
+            collector = returned;
+            if let Some(host) = host {
+                if tx.send(Record::HostInfo(host)).is_err() {
+                    log::error!("storage channel closed; stopping collector for {alias}");
+                    return;
+                }
+            }
+        }
 
-        for (alias, handle) in pending {
-            match handle.await {
-                Ok((res, elapsed, col)) => {
-                    self.collectors.insert(alias.clone(), col);
-                    match res {
-                        Ok(rec) => {
-                            if elapsed > self.slow_threshold
-                                && self.rate.should_warn(&format!("slow:{alias}"), WARN_WINDOW)
-                            {
-                                log::warn!(
-                                    "slow tick for {alias} ({label}): {elapsed:?} > threshold {:?} (continuing)",
-                                    self.slow_threshold
-                                );
-                            }
-                            if let Record::Metrics(sample) = &rec {
-                                if let Some(ms) = sample.extras.extras_ms {
-                                    if u64::from(ms) > 20
-                                        && self.rate.should_warn(
-                                            &format!("extras_slow:{alias}"),
-                                            WARN_WINDOW,
-                                        )
-                                    {
-                                        log::warn!(
-                                            "extras collection for {alias} took {ms} ms (> 20 ms budget; consider moving a family to lower cadence)"
-                                        );
-                                    }
-                                }
-                            }
-                            if let Err(e) = self.tx.send(rec) {
-                                if self.rate.should_warn(&format!("sink:{alias}"), WARN_WINDOW) {
-                                    log::error!("storage channel closed, record dropped: {e}");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if self.rate.should_warn(&format!("err:{alias}"), WARN_WINDOW) {
-                                log::warn!("collect {label} for {alias} failed: {e}");
-                            }
-                        }
+        let with_processes = tick_seconds >= next_process_at;
+        if with_processes {
+            next_process_at += process_interval.as_secs();
+        }
+
+        let t0 = Instant::now();
+        let (result, returned) = match tokio::task::spawn_blocking(move || {
+            let result = collector.metrics();
+            (result, collector)
+        })
+        .await
+        {
+            Ok(pair) => pair,
+            Err(error) => {
+                log::error!("collector for {alias} panicked: {error}; server disabled");
+                return;
+            }
+        };
+        collector = returned;
+        let elapsed = t0.elapsed();
+        match result {
+            Ok(sample) => {
+                if elapsed > slow_threshold
+                    && rate.should_warn(&format!("slow:metrics:{alias}"), WARN_WINDOW)
+                {
+                    log::warn!("slow metrics tick for {alias}: {elapsed:?} > {slow_threshold:?}");
+                }
+                if let Some(ms) = sample.extras.extras_ms {
+                    if ms > 20 && rate.should_warn(&format!("extras_slow:{alias}"), WARN_WINDOW) {
+                        log::warn!("extras collection for {alias} took {ms} ms (>20 ms budget)");
                     }
                 }
-                Err(join_err) => {
-                    self.dead.push(alias.clone());
-                    log::error!(
-                        "collector task for {alias} panicked: {join_err}; server disabled for this run"
+                if sample.extras.extras_errors.unwrap_or(0) > 0
+                    && rate.should_warn(&format!("extras_err:{alias}"), WARN_WINDOW)
+                {
+                    log::warn!(
+                        "extras parse errors for {alias}: {} family/families failed this tick",
+                        sample.extras.extras_errors.unwrap_or(0)
                     );
+                }
+                if tx.send(Record::Metrics(Box::new(sample))).is_err() {
+                    if rate.should_warn(&format!("sink:{alias}"), WARN_WINDOW) {
+                        log::error!("storage channel closed; stopping collector for {alias}");
+                    }
+                    return;
+                }
+            }
+            Err(error) => {
+                if rate.should_warn(&format!("err:metrics:{alias}"), WARN_WINDOW) {
+                    log::warn!("collect metrics for {alias} failed: {error}");
+                }
+            }
+        }
+
+        if !with_processes {
+            continue;
+        }
+        let t0 = Instant::now();
+        let (result, returned) = match tokio::task::spawn_blocking(move || {
+            let result = collector.processes();
+            (result, collector)
+        })
+        .await
+        {
+            Ok(pair) => pair,
+            Err(error) => {
+                log::error!("collector for {alias} panicked: {error}; server disabled");
+                return;
+            }
+        };
+        collector = returned;
+        let elapsed = t0.elapsed();
+        match result {
+            Ok(snapshot) => {
+                if elapsed > slow_threshold
+                    && rate.should_warn(&format!("slow:processes:{alias}"), WARN_WINDOW)
+                {
+                    log::warn!("slow process tick for {alias}: {elapsed:?} > {slow_threshold:?}");
+                }
+                if tx.send(Record::Processes(snapshot)).is_err() {
+                    if rate.should_warn(&format!("sink:{alias}"), WARN_WINDOW) {
+                        log::error!("storage channel closed; stopping collector for {alias}");
+                    }
+                    return;
+                }
+            }
+            Err(error) => {
+                if rate.should_warn(&format!("err:processes:{alias}"), WARN_WINDOW) {
+                    log::warn!("collect processes for {alias} failed: {error}");
                 }
             }
         }
@@ -201,16 +247,13 @@ impl Scheduler {
 mod tests {
     use super::*;
 
-    /// Rate limiter: first call fires, immediate repeat is suppressed,
-    /// different keys are independent, and the window re-arms.
     #[tokio::test]
     async fn rate_limiter_windows() {
         let mut rl = RateLimiter::default();
         assert!(rl.should_warn("a", WARN_WINDOW));
         assert!(!rl.should_warn("a", WARN_WINDOW));
-        assert!(rl.should_warn("b", WARN_WINDOW)); // different key
+        assert!(rl.should_warn("b", WARN_WINDOW));
         assert!(!rl.should_warn("b", WARN_WINDOW));
-        // Re-arm with a short window.
         std::thread::sleep(Duration::from_millis(10));
         assert!(rl.should_warn("a", Duration::from_millis(5)));
     }

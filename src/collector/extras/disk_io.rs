@@ -50,7 +50,7 @@ impl DiskRaw {
     pub fn read_local() -> Option<Self> {
         std::fs::read_to_string("/proc/diskstats")
             .ok()
-            .map(|t| Self::parse(&t).unwrap())
+            .and_then(|t| Self::parse(&t))
     }
 
     pub fn names(&self) -> Vec<String> {

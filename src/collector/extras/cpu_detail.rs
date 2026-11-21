@@ -85,17 +85,18 @@ fn delta(cur: u64, prev: u64) -> f64 {
     (cur as i128 - prev as i128).max(0) as f64
 }
 
-/// Computes CpuDetail from two snapshots `window` seconds apart.
-/// `include_per_core` controls whether the full per-core vector is
-/// included (60 s cadence, see module docs in extras/mod.rs); the
-/// max/p95/cores_over_50 shape scalars are computed whenever any core
-/// data exists.
-pub fn compute(
-    prev: &CpuRaw,
-    cur: &CpuRaw,
-    window: f64,
-    include_per_core: bool,
-) -> Option<CpuDetail> {
+fn percentile(sorted: &[f32], pct: u32) -> Option<f32> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let idx = (sorted.len() * pct as usize).div_ceil(100) - 1;
+    Some(sorted[idx.min(sorted.len() - 1)])
+}
+
+/// Computes CpuDetail from two snapshots `window` seconds apart. The full
+/// per-core vector and its distribution are recorded every tick; values
+/// are rounded to 2 decimals so a 384-core line stays manageable.
+pub fn compute(prev: &CpuRaw, cur: &CpuRaw, window: f64) -> Option<CpuDetail> {
     if window <= 0.0 {
         return None;
     }
@@ -112,48 +113,54 @@ pub fn compute(
         )
     };
 
-    let mut per_core: Option<Vec<f32>> = None;
-    let mut max: Option<f32> = None;
-    let mut p95: Option<f32> = None;
-    let mut over50: Option<u32> = None;
-    if !cur.cores.is_empty() {
-        let mut busy: Vec<f32> = Vec::with_capacity(cur.cores.len());
-        for (ci, c) in cur.cores.iter().enumerate() {
-            let p = match prev.cores.get(ci) {
-                Some(p) => p,
-                // Topology changed mid-run (hotplug): skip this core.
-                None => continue,
-            };
-            let dt = delta(c.iter().sum(), p.iter().sum());
-            if dt <= 0.0 {
-                continue;
-            }
-            let idle = delta(c[3], p[3]) + delta(c[4], p[4]);
-            busy.push(((dt - idle) / dt * 100.0).clamp(0.0, 100.0) as f32);
+    let mut busy: Vec<f32> = Vec::with_capacity(cur.cores.len());
+    for (ci, c) in cur.cores.iter().enumerate() {
+        let Some(p) = prev.cores.get(ci) else {
+            // Topology changed mid-run (hotplug): skip this core.
+            continue;
+        };
+        let dt = delta(c.iter().sum(), p.iter().sum());
+        if dt <= 0.0 {
+            continue;
         }
-        if busy.is_empty() {
-            return Some(CpuDetail {
-                iowait_percent: iowait as f32,
-                steal_percent: steal as f32,
-                softirq_percent: softirq as f32,
-                load_avg_5m: cur.load[1],
-                load_avg_15m: cur.load[2],
-                per_core_percent: None,
-                per_core_max_percent: None,
-                per_core_p95_percent: None,
-                cores_over_50: None,
-            });
-        }
-        let n = busy.len();
-        max = Some(busy.iter().copied().fold(0.0f32, f32::max));
-        let mut sorted = busy.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = (n * 95).div_ceil(100) - 1;
-        p95 = Some(sorted[idx.min(n - 1)]);
-        over50 = Some(busy.iter().filter(|&&v| v > 50.0).count() as u32);
-        if include_per_core {
-            per_core = Some(busy);
-        }
+        let idle = delta(c[3], p[3]) + delta(c[4], p[4]);
+        let value = ((dt - idle) / dt * 100.0).clamp(0.0, 100.0);
+        busy.push((value as f32 * 100.0).round() / 100.0);
+    }
+
+    if busy.is_empty() {
+        return Some(CpuDetail {
+            iowait_percent: iowait as f32,
+            steal_percent: steal as f32,
+            softirq_percent: softirq as f32,
+            load_avg_5m: cur.load[1],
+            load_avg_15m: cur.load[2],
+            per_core_percent: None,
+            per_core_min_percent: None,
+            per_core_mean_percent: None,
+            per_core_p50_percent: None,
+            per_core_max_percent: None,
+            per_core_p95_percent: None,
+            cores_over_50: None,
+            cores_over_90: None,
+            busy_histogram: None,
+        });
+    }
+
+    let n = busy.len();
+    let sum: f32 = busy.iter().sum();
+    let min = busy.iter().copied().fold(f32::MAX, f32::min);
+    let max = busy.iter().copied().fold(0.0f32, f32::max);
+    let mut sorted = busy.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p50 = percentile(&sorted, 50);
+    let p95 = percentile(&sorted, 95);
+    let over50 = busy.iter().filter(|&&v| v > 50.0).count() as u32;
+    let over90 = busy.iter().filter(|&&v| v > 90.0).count() as u32;
+    let mut histogram = vec![0u32; 10];
+    for &value in &busy {
+        let bin = ((value / 10.0).floor() as usize).min(9);
+        histogram[bin] += 1;
     }
 
     Some(CpuDetail {
@@ -162,10 +169,15 @@ pub fn compute(
         softirq_percent: softirq as f32,
         load_avg_5m: cur.load[1],
         load_avg_15m: cur.load[2],
-        per_core_percent: per_core,
-        per_core_max_percent: max,
+        per_core_percent: Some(busy),
+        per_core_min_percent: Some(min),
+        per_core_mean_percent: Some(sum / n as f32),
+        per_core_p50_percent: p50,
+        per_core_max_percent: Some(max),
         per_core_p95_percent: p95,
-        cores_over_50: over50,
+        cores_over_50: Some(over50),
+        cores_over_90: Some(over90),
+        busy_histogram: Some(histogram),
     })
 }
 
@@ -188,7 +200,7 @@ mod tests {
         let prev = raw(1000, 900, 0, 0, 0);
         let cur = raw(2000, 1800, 100, 20, 30);
         // total delta 1000; iowait 100 -> 10%, steal 20 -> 2%, softirq 30 -> 3%
-        let d = compute(&prev, &cur, 5.0, false).unwrap();
+        let d = compute(&prev, &cur, 5.0).unwrap();
         assert!((d.iowait_percent - 10.0).abs() < 0.01);
         assert!((d.steal_percent - 2.0).abs() < 0.01);
         assert!((d.softirq_percent - 3.0).abs() < 0.01);
@@ -202,7 +214,7 @@ mod tests {
         // Reboot between samples: counters jump down -> no negative percents.
         let prev = raw(9_000_000, 8_000_000, 0, 0, 0);
         let cur = raw(500, 450, 10, 5, 5);
-        let d = compute(&prev, &cur, 5.0, false).unwrap();
+        let d = compute(&prev, &cur, 5.0).unwrap();
         assert_eq!(d.iowait_percent, 0.0);
         assert_eq!(d.steal_percent, 0.0);
     }
@@ -241,7 +253,7 @@ mod tests {
         // keep globals consistent-ish (not asserted)
         prev.global = [0; 10];
         cur.global = [100, 0, 0, 100, 0, 0, 0, 0, 0, 0];
-        let d = compute(&prev, &cur, 5.0, true).unwrap();
+        let d = compute(&prev, &cur, 5.0).unwrap();
         let v = d.per_core_percent.as_ref().unwrap();
         assert_eq!(v.len(), 4);
         assert!((v[0] - 100.0).abs() < 0.1);
@@ -249,6 +261,13 @@ mod tests {
         assert!((v[3] - 60.0).abs() < 0.1);
         assert!((d.per_core_max_percent.unwrap() - 100.0).abs() < 0.1);
         assert_eq!(d.cores_over_50.unwrap(), 2);
+        assert_eq!(d.cores_over_90.unwrap(), 1);
         assert!(d.per_core_p95_percent.is_some());
+        assert_eq!(d.per_core_min_percent, Some(0.0));
+        assert!(d.per_core_mean_percent.unwrap() > 50.0);
+        assert_eq!(d.per_core_p50_percent, Some(50.0));
+        let histogram = d.busy_histogram.unwrap();
+        assert_eq!(histogram.len(), 10);
+        assert_eq!(histogram.iter().sum::<u32>(), 4);
     }
 }

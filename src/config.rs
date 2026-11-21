@@ -90,6 +90,8 @@ pub struct ExtrasConfig {
     /// Pressure-Stall-Information flat keys (psi_*_some), from
     /// /proc/pressure/{cpu,memory,io}.
     pub psi: bool,
+    /// Mounted filesystem capacity/usage (local statvfs / remote df).
+    pub fs_space: bool,
 }
 
 impl Default for ExtrasConfig {
@@ -102,6 +104,7 @@ impl Default for ExtrasConfig {
             gpu_detail: GpuDetailMode::Auto,
             slurm: SlurmMode::Auto,
             psi: true,
+            fs_space: true,
         }
     }
 }
@@ -249,7 +252,7 @@ mod tests {
 
     fn sample() -> String {
         r#"
-schema_version = 1
+schema_version = 2
 
 [global]
 interval_secs = 5

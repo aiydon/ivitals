@@ -12,7 +12,7 @@
 //! - [`scheduler`] — two-worker tokio tick loop with rate-limited warnings
 
 /// Data schema version written into every record.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub mod collector;
 pub mod config;

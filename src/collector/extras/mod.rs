@@ -18,35 +18,36 @@
 
 pub mod cpu_detail;
 pub mod disk_io;
+pub mod fs;
 pub mod gpu_detail;
 pub mod memory_detail;
 pub mod net;
 pub mod slurm;
 
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
 use crate::config::ExtrasConfig;
-use crate::model::{CpuDetail, DiskIo, Extras, GpuDetail, MemoryDetail, NetStat, SlurmStat};
+use crate::model::{
+    CpuDetail, DiskIo, Extras, Filesystem, GpuDetail, MemoryDetail, NetStat, SlurmStat,
+};
 
 pub use cpu_detail::CpuRaw;
 pub use disk_io::DiskRaw;
 pub use memory_detail::MemRaw;
 pub use net::NetRaw;
 
-/// Per-core busy vector sampling period. On a 384-core host the full
-/// vector is ~3.6 KB; per tick that is ~62 MB/day. The shape is preserved
-/// by the every-tick scalars (max / p95 / cores_over_50) — see
-/// docs/metrics-research.md §6.
-pub const PER_CORE_PERIOD: Duration = Duration::from_secs(60);
-
 /// Slurm sampling period. `sinfo` takes ~100-300 ms, which blows the
 /// per-metric local budget if run every 5 s; 60 s matches the process
 /// snapshot cadence and the queue state does not change faster than that
 /// in any meaningful way.
 const SLURM_PERIOD: Duration = Duration::from_secs(60);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_COMMAND_OUTPUT: u64 = 4 * 1024 * 1024;
 
 /// Which extras are enabled, derived from `[extras]` in config.toml.
 /// `off` = the family is not collected at all (no field, no cost).
@@ -59,6 +60,7 @@ pub struct Flags {
     pub gpu_detail: bool,
     pub slurm: bool,
     pub psi: bool,
+    pub fs_space: bool,
 }
 
 impl Flags {
@@ -74,6 +76,7 @@ impl Flags {
             ),
             slurm: matches!(cfg.slurm, crate::config::SlurmMode::Auto),
             psi: cfg.psi,
+            fs_space: cfg.fs_space,
         }
     }
 
@@ -85,6 +88,7 @@ impl Flags {
             || self.gpu_detail
             || self.slurm
             || self.psi
+            || self.fs_space
     }
 }
 
@@ -97,11 +101,14 @@ pub struct ExtrasData {
     pub net: Option<NetStat>,
     pub gpu_detail: Option<Vec<GpuDetail>>,
     pub slurm: Option<SlurmStat>,
+    pub filesystems: Option<Vec<Filesystem>>,
     /// Flat PSI keys (`psi_cpu_some` etc.), merged into `Extras.extra`.
     pub psi: BTreeMap<String, Value>,
     /// Wall time spent producing this tick's extras (ms); the scheduler
     /// warns (rate-limited) when it exceeds the 20 ms budget.
     pub extras_ms: u32,
+    /// Enabled families whose non-empty input failed to parse.
+    pub parse_errors: u32,
 }
 
 impl ExtrasData {
@@ -113,11 +120,15 @@ impl ExtrasData {
         e.net = self.net;
         e.gpu_detail = self.gpu_detail;
         e.slurm = self.slurm;
+        e.filesystems = self.filesystems;
         for (k, v) in std::mem::take(&mut self.psi) {
             e.extra.insert(k, v);
         }
         if e.extras_ms.is_none() {
             e.extras_ms = Some(self.extras_ms);
+        }
+        if e.extras_errors.is_none() && self.parse_errors > 0 {
+            e.extras_errors = Some(self.parse_errors);
         }
     }
 }
@@ -136,7 +147,6 @@ struct PrevState {
 pub struct ExtrasCollector {
     flags: Flags,
     prev: PrevState,
-    last_per_core: Option<Instant>,
     last_slurm: Option<Instant>,
     /// Local-only Slurm probe cache: None = not probed, Some(false) =
     /// no sinfo, Some(true) = sinfo present. Probing is a single
@@ -152,7 +162,6 @@ impl ExtrasCollector {
         Self {
             flags,
             prev: PrevState::default(),
-            last_per_core: None,
             last_slurm: None,
             slurm_local_available: None,
         }
@@ -183,6 +192,9 @@ impl ExtrasCollector {
         if self.flags.psi {
             data.psi = read_psi();
         }
+        if self.flags.fs_space {
+            data.filesystems = fs::read_local();
+        }
         self.compute_from(t0, &cur, &mut data);
         data.gpu_detail = gpu;
         if self.flags.slurm && self.slurm_due(t0) {
@@ -209,24 +221,37 @@ impl ExtrasCollector {
             ts: Some(t0),
             ..Default::default()
         };
+        let mut parse_errors = 0u32;
         if self.flags.cpu_detail {
             if let Some(text) = sections.get("cpu_detail") {
                 cur.cpu = CpuRaw::parse(text);
+                if cur.cpu.is_none() && !text.trim().is_empty() {
+                    parse_errors += 1;
+                }
             }
         }
         if self.flags.memory_detail {
             if let Some(text) = sections.get("memory_detail") {
                 cur.mem = MemRaw::parse(text);
+                if cur.mem.is_none() && !text.trim().is_empty() {
+                    parse_errors += 1;
+                }
             }
         }
         if self.flags.disk_io {
             if let Some(text) = sections.get("diskstats") {
                 cur.disk = DiskRaw::parse(text);
+                if cur.disk.is_none() && !text.trim().is_empty() {
+                    parse_errors += 1;
+                }
             }
         }
         if self.flags.net {
             if let Some(text) = sections.get("net") {
                 cur.net = NetRaw::parse(text);
+                if cur.net.is_none() && !text.trim().is_empty() {
+                    parse_errors += 1;
+                }
             }
         }
         let mut data = ExtrasData::default();
@@ -247,9 +272,18 @@ impl ExtrasCollector {
                 }
             }
         }
+        if self.flags.fs_space {
+            if let Some(text) = sections.get("filesystems") {
+                data.filesystems = fs::parse_df(text);
+                if data.filesystems.is_none() && !text.trim().is_empty() {
+                    parse_errors += 1;
+                }
+            }
+        }
         self.compute_from(t0, &cur, &mut data);
         data.gpu_detail = gpu;
         data.slurm = slurm;
+        data.parse_errors = parse_errors;
         data.extras_ms = t0.elapsed().as_millis() as u32;
         self.prev = cur;
         data
@@ -268,7 +302,7 @@ impl ExtrasCollector {
         }
         if self.flags.cpu_detail {
             if let (Some(pc), Some(cc)) = (&prev.cpu, &cur.cpu) {
-                data.cpu_detail = cpu_detail::compute(pc, cc, window, self.per_core_due(t0));
+                data.cpu_detail = cpu_detail::compute(pc, cc, window);
             }
         }
         if self.flags.memory_detail {
@@ -288,17 +322,6 @@ impl ExtrasCollector {
         }
     }
 
-    fn per_core_due(&mut self, t0: Instant) -> bool {
-        let due = match self.last_per_core {
-            None => true,
-            Some(last) => t0.duration_since(last) >= PER_CORE_PERIOD,
-        };
-        if due {
-            self.last_per_core = Some(t0);
-        }
-        due
-    }
-
     fn slurm_due(&mut self, t0: Instant) -> bool {
         let due = match self.last_slurm {
             None => true,
@@ -311,35 +334,71 @@ impl ExtrasCollector {
     }
 
     /// Local Slurm: probe once (cached), then run sinfo/squeue via the
-    /// same command shapes the remote script uses.
+    /// same command shapes the remote script uses. Every command has a
+    /// hard deadline so a stuck slurmctld cannot wedge collection.
     fn slurm_local(&mut self) -> Option<SlurmStat> {
-        use std::process::Command;
         let available = *self.slurm_local_available.get_or_insert_with(|| {
-            Command::new("sinfo")
-                .arg("--version")
-                .output()
+            let mut cmd = Command::new("sinfo");
+            cmd.arg("--version");
+            run_with_timeout(cmd, COMMAND_TIMEOUT)
                 .map(|o| o.status.success())
                 .unwrap_or(false)
         });
         if !available {
             return None;
         }
-        let nodes = Command::new("sinfo")
-            .args(["-N", "-h", "-o", "%T %c %C %G"])
-            .output()
-            .ok()?
-            .stdout;
+        let mut cmd = Command::new("sinfo");
+        cmd.args(["-N", "-h", "-o", "%T %c %C %G"]);
+        let nodes = run_with_timeout(cmd, COMMAND_TIMEOUT)?.stdout;
+        let mut cmd = Command::new("squeue");
+        cmd.args(["-h", "-o", "%t"]);
+        let jobs = run_with_timeout(cmd, COMMAND_TIMEOUT)?.stdout;
         let nodes = String::from_utf8_lossy(&nodes).into_owned();
-        let jobs = Command::new("squeue")
-            .args(["-h", "-o", "%t"])
-            .output()
-            .ok()?
-            .stdout;
         let jobs = String::from_utf8_lossy(&jobs).into_owned();
         if nodes.trim().is_empty() {
             return None;
         }
         slurm::parse(&format!("{nodes}\n#jobs\n{jobs}"))
+    }
+}
+
+/// Runs a command with a deadline and a bounded stdout/stderr capture.
+/// `None` on spawn error, timeout, or a command that does not exit.
+/// stderr is drained too, so a chatty command cannot fill the pipe and
+/// deadlock the wait loop.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Option<Output> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                if let Some(out) = child.stdout.take() {
+                    let _ = out.take(MAX_COMMAND_OUTPUT).read_to_end(&mut stdout);
+                }
+                if let Some(err) = child.stderr.take() {
+                    let _ = err.take(1024 * 1024).read_to_end(&mut stderr);
+                }
+                return Some(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
+        }
     }
 }
 
@@ -411,6 +470,7 @@ mod tests {
             gpu_detail: crate::config::GpuDetailMode::Off,
             slurm: crate::config::SlurmMode::Off,
             psi: false,
+            fs_space: false,
         };
         let f = Flags::from_config(&cfg);
         assert!(!f.cpu_detail);

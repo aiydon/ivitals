@@ -1,18 +1,30 @@
-//! `net` extra: aggregate NIC throughput + TCP retransmission rate.
+//! `net` extra: aggregate NIC throughput + per-interface rates + TCP
+//! retransmission rate.
 //!
-//! Sources: /proc/net/dev (per-interface rx/tx bytes, `lo` excluded —
-//! remote loopback would dominate any aggregate) and the `Tcp:` section of
-//! /proc/net/snmp (`OutSegs`, `RetransSegs` counters; `TcpExt` is absent
-//! on some kernels, so the coarser `Tcp:` counters are the portable
-//! source).
+//! Sources: /proc/net/dev (per-interface rx/tx bytes, packets, errors,
+//! drops; `lo` excluded) and the `Tcp:` section of /proc/net/snmp
+//! (`OutSegs`, `RetransSegs` counters; `TcpExt` is absent on some kernels,
+//! so the coarser `Tcp:` counters are the portable source).
 
-use crate::model::NetStat;
+use crate::model::{NetInterface, NetStat};
 
-/// One snapshot: (interface, rx_bytes, tx_bytes) per interface plus the
-/// TCP counters (out_segs, retrans_segs).
+/// One interface snapshot row: bytes/packets/errors/drops for rx and tx.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NetIface {
+    pub name: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    pub rx_errors: u64,
+    pub tx_errors: u64,
+    pub rx_drops: u64,
+    pub tx_drops: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NetRaw {
-    pub dev: Vec<(String, u64, u64)>,
+    pub dev: Vec<NetIface>,
     pub tcp: Option<(u64, u64)>,
 }
 
@@ -23,7 +35,8 @@ impl NetRaw {
         let (dev_text, snmp_text) = text.split_once("#snmp_tcp")?;
         let mut dev = Vec::new();
         for line in dev_text.lines().skip(2) {
-            // Two header lines, then " iface: rx_bytes rx_pkts ... tx_bytes..."
+            // Two header lines, then " iface: rx_bytes rx_pkts errs drop ...
+            // tx_bytes tx_pkts errs drop ..."
             let (ifname, rest) = match line.split_once(':') {
                 Some(p) => p,
                 None => continue,
@@ -33,15 +46,31 @@ impl NetRaw {
                 continue;
             }
             let t: Vec<&str> = rest.split_whitespace().collect();
-            // 16 values: rx_bytes=t[0], tx_bytes=t[8]; malformed rows
-            // are skipped, one bad interface must not kill the family.
-            let Some(rx) = t.first().and_then(|s| s.parse().ok()) else {
+            if t.len() < 16 {
+                continue;
+            }
+            let parse = |i: usize| t.get(i).and_then(|s| s.parse::<u64>().ok());
+            let (Some(rx_bytes), Some(rx_packets), Some(rx_errors), Some(rx_drops)) =
+                (parse(0), parse(1), parse(2), parse(3))
+            else {
                 continue;
             };
-            let Some(tx) = t.get(8).and_then(|s| s.parse().ok()) else {
+            let (Some(tx_bytes), Some(tx_packets), Some(tx_errors), Some(tx_drops)) =
+                (parse(8), parse(9), parse(10), parse(11))
+            else {
                 continue;
             };
-            dev.push((name.to_string(), rx, tx));
+            dev.push(NetIface {
+                name: name.to_string(),
+                rx_bytes,
+                tx_bytes,
+                rx_packets,
+                tx_packets,
+                rx_errors,
+                tx_errors,
+                rx_drops,
+                tx_drops,
+            });
         }
         let tcp = parse_snmp_tcp(snmp_text);
         Some(Self { dev, tcp })
@@ -73,7 +102,6 @@ fn parse_snmp_tcp(text: &str) -> Option<(u64, u64)> {
     let mut out_segs = None;
     let mut retrans_segs = None;
     for (i, n) in names.iter().enumerate() {
-        // The leading "Tcp:" column is not numeric; skip non-values.
         let Some(v) = vals.get(i).and_then(|s| s.parse::<u64>().ok()) else {
             continue;
         };
@@ -90,22 +118,41 @@ fn delta(cur: u64, prev: u64) -> f64 {
     (cur as i128 - prev as i128).max(0) as f64
 }
 
-/// Computes NetStat from two snapshots `window` seconds apart. All three
-/// fields are delta-based, so `None` when either snapshot lacks the TCP
-/// counters (whole struct absent, no partial pseudo-values).
+/// Computes NetStat from two snapshots `window` seconds apart. The
+/// aggregate and per-interface rows share the same delta window.
 pub fn compute(prev: &NetRaw, cur: &NetRaw, window: f64) -> Option<NetStat> {
     if window <= 0.0 {
         return None;
     }
     let mut rx = 0.0f64;
     let mut tx = 0.0f64;
-    for (name, c_rx, c_tx) in &cur.dev {
-        if let Some((_, p_rx, p_tx)) = prev.dev.iter().find(|(n, _, _)| n == name) {
-            rx += delta(*c_rx, *p_rx);
-            tx += delta(*c_tx, *p_tx);
-        }
-        // Interfaces that appeared mid-run have no baseline; skip them.
+    let mut interfaces = Vec::new();
+    for cur_row in &cur.dev {
+        let Some(prev_row) = prev.dev.iter().find(|p| p.name == cur_row.name) else {
+            // Interface appeared mid-run: no baseline, skip this tick.
+            continue;
+        };
+        let d_rx = delta(cur_row.rx_bytes, prev_row.rx_bytes);
+        let d_tx = delta(cur_row.tx_bytes, prev_row.tx_bytes);
+        rx += d_rx;
+        tx += d_tx;
+        interfaces.push(NetInterface {
+            name: cur_row.name.clone(),
+            rx_bytes_per_s: (d_rx / window) as u64,
+            tx_bytes_per_s: (d_tx / window) as u64,
+            rx_packets_per_s: (delta(cur_row.rx_packets, prev_row.rx_packets) / window) as u64,
+            tx_packets_per_s: (delta(cur_row.tx_packets, prev_row.tx_packets) / window) as u64,
+            rx_errors_per_s: delta(cur_row.rx_errors, prev_row.rx_errors) / window,
+            tx_errors_per_s: delta(cur_row.tx_errors, prev_row.tx_errors) / window,
+            rx_drops_per_s: delta(cur_row.rx_drops, prev_row.rx_drops) / window,
+            tx_drops_per_s: delta(cur_row.tx_drops, prev_row.tx_drops) / window,
+        });
     }
+    interfaces.sort_by(|a, b| {
+        (b.rx_bytes_per_s + b.tx_bytes_per_s).cmp(&(a.rx_bytes_per_s + a.tx_bytes_per_s))
+    });
+    interfaces.truncate(16);
+
     let (c_out, c_re) = cur.tcp?;
     let (p_out, p_re) = prev.tcp?;
     let d_out = delta(c_out, p_out);
@@ -119,6 +166,7 @@ pub fn compute(prev: &NetRaw, cur: &NetRaw, window: f64) -> Option<NetStat> {
         rx_bytes_per_s: (rx / window) as u64,
         tx_bytes_per_s: (tx / window) as u64,
         retrans_percent: retrans as f32,
+        interfaces,
     })
 }
 
@@ -128,7 +176,14 @@ mod tests {
 
     fn raw(rx: u64, tx: u64, out: u64, re: u64) -> NetRaw {
         NetRaw {
-            dev: vec![("eth0".into(), rx, tx)],
+            dev: vec![NetIface {
+                name: "eth0".into(),
+                rx_bytes: rx,
+                tx_bytes: tx,
+                rx_packets: rx / 100,
+                tx_packets: tx / 100,
+                ..Default::default()
+            }],
             tcp: Some((out, re)),
         }
     }
@@ -140,8 +195,10 @@ mod tests {
         let d = compute(&prev, &cur, 5.0).unwrap();
         assert_eq!(d.rx_bytes_per_s, 5000);
         assert_eq!(d.tx_bytes_per_s, 10000);
-        // 100/1000 = 10%
         assert!((d.retrans_percent - 10.0).abs() < 0.001);
+        assert_eq!(d.interfaces.len(), 1);
+        assert_eq!(d.interfaces[0].name, "eth0");
+        assert_eq!(d.interfaces[0].rx_bytes_per_s, 5000);
     }
 
     #[test]
@@ -167,16 +224,18 @@ mod tests {
             "Inter-|   Receive                                                |  Transmit\n",
             " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
             "    lo: 1234567     100    0    0    0     0          0         0  1234567     100    0    0    0     0       0          0\n",
-            "  eth0: 999999     500    0    0    0     0          0         0  888888     400    0    0    0     0       0          0\n",
+            "  eth0: 999999     500   2    3    0     0          0         0  888888     400    4    5    0     0       0          0\n",
             "#snmp_tcp\n",
             "Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts InCsumErrors\n",
             "Tcp: 1 200 120000 -1 10 20 3 4 5 10000 20000 100 0 6 0\n",
         );
         let r = NetRaw::parse(text).unwrap();
         assert_eq!(r.dev.len(), 1);
-        assert_eq!(r.dev[0].0, "eth0");
-        assert_eq!(r.dev[0].1, 999999);
-        assert_eq!(r.dev[0].2, 888888);
+        assert_eq!(r.dev[0].name, "eth0");
+        assert_eq!(r.dev[0].rx_bytes, 999999);
+        assert_eq!(r.dev[0].tx_bytes, 888888);
+        assert_eq!(r.dev[0].rx_errors, 2);
+        assert_eq!(r.dev[0].tx_drops, 5);
         assert_eq!(r.tcp, Some((20000, 100)));
     }
 }
