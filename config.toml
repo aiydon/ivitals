@@ -1,10 +1,10 @@
 # ivitals configuration. Zero CLI args: this file is the only input.
-schema_version = 1
+schema_version = 2
 
 [global]
 interval_secs = 5
 process_interval_secs = 60
-top_n_processes = 20
+top_n_processes = 50
 retention_days = 30
 data_dir = "data"
 log_level = "info"
@@ -16,6 +16,7 @@ disk_io = true
 net = true
 gpu_detail = "auto"
 slurm = "auto"
+fs_space = true
 
 # Remote servers use literal hosts (resolved from ~/.ssh/config on
 # 2026-11-17) so ivitals runs on machines without the same ssh config.
@@ -24,7 +25,7 @@ slurm = "auto"
 # reachable from within that network.
 
 [[servers]]
-alias = "math2"
+alias = "sustech"
 mode = "remote"
 ssh_host = "10.16.122.147"
 ssh_user = "iydon"
@@ -32,7 +33,7 @@ connect_timeout_secs = 5
 exec_timeout_secs = 15
 
 [[servers]]
-alias = "bot"
+alias = "sinotruk"
 mode = "remote"
 ssh_host = "frp.iydon.top"
 ssh_user = "sinotruk"
@@ -41,10 +42,18 @@ connect_timeout_secs = 5
 exec_timeout_secs = 15
 
 [[servers]]
-alias = "amax"
+alias = "valadu"
 mode = "remote"
-ssh_host = "10.16.71.12"
-ssh_user = "math"
+ssh_host = "10.25.179.122"
+ssh_user = "iydon"
+connect_timeout_secs = 5
+exec_timeout_secs = 15
+
+[[servers]]
+alias = "frp"
+mode = "remote"
+ssh_host = "frp.iydon.top"
+ssh_user = "root"
 connect_timeout_secs = 5
 exec_timeout_secs = 15
 
