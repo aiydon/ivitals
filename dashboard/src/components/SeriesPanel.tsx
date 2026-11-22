@@ -11,7 +11,7 @@ import { CanvasRenderer } from "echarts/renderers";
 
 import { api } from "../api";
 import { DateRangeBar } from "./DateRangeBar";
-import { formatDateTime, formatDuration, formatPercent } from "../format";
+import { formatBytes, formatDateTime, formatDuration, formatPercent } from "../format";
 import { chartTheme, useTheme } from "../theme";
 import type { MetaResponse, SeriesResponse } from "../shared/types";
 
@@ -33,7 +33,10 @@ type NumericField =
   | "gpuUtil"
   | "gpuMem"
   | "gpuTemp"
-  | "gpuPower";
+  | "gpuPower"
+  | "diskRead"
+  | "diskWrite"
+  | "fsUsedMax";
 
 function gapAware(
   data: SeriesResponse,
@@ -348,6 +351,141 @@ function GpuChart({ data }: { data: SeriesResponse }) {
   );
 }
 
+function diskChartOption(data: SeriesResponse, theme: "dark" | "light"): Record<string, unknown> {
+  const c = chartTheme(theme);
+  return {
+    animation: false,
+    backgroundColor: "transparent",
+    textStyle: { color: c.fg, fontFamily: "IBM Plex Sans" },
+    grid: { left: 62, right: 52, top: 32, bottom: 36 },
+    legend: {
+      type: "scroll",
+      top: 0,
+      textStyle: { color: c.muted, fontFamily: "IBM Plex Sans" },
+      icon: "roundRect",
+      itemWidth: 14,
+      pageTextStyle: { color: c.muted },
+    },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: c.tooltipBg,
+      borderColor: c.tooltipBorder,
+      textStyle: { color: c.fg, fontSize: 12 },
+      formatter: (params: Array<{ dataIndex: number }>) => {
+        const point = data.points[params[0]?.dataIndex ?? 0];
+        if (!point) return "";
+        return [
+          `<div class="tt-time">${formatDateTime(point.t)}</div>`,
+          `<div class="tt-row"><span>读</span><b>${point.diskRead === null ? "—" : `${formatBytes(point.diskRead)}/s`}</b></div>`,
+          `<div class="tt-row"><span>写</span><b>${point.diskWrite === null ? "—" : `${formatBytes(point.diskWrite)}/s`}</b></div>`,
+          `<div class="tt-row"><span>最高盘使用率</span><b>${formatPercent(point.fsUsedMax)}</b></div>`,
+        ].join("");
+      },
+    },
+    xAxis: {
+      type: "time",
+      axisLabel: { color: c.muted, hideOverlap: true, fontFamily: "IBM Plex Mono" },
+      axisLine: { lineStyle: { color: c.border } },
+      splitLine: { show: false },
+    },
+    yAxis: [
+      {
+        type: "value",
+        min: 0,
+        axisLabel: {
+          color: c.muted,
+          fontFamily: "IBM Plex Mono",
+          formatter: (value: number) =>
+            value >= 1e9
+              ? `${(value / 1e9).toFixed(1)} GB/s`
+              : value >= 1e6
+                ? `${(value / 1e6).toFixed(0)} MB/s`
+                : `${(value / 1e3).toFixed(0)} KB/s`,
+        },
+        splitLine: { lineStyle: { color: c.border, type: "dashed" } },
+      },
+      {
+        type: "value",
+        min: 0,
+        max: 100,
+        axisLabel: { color: c.muted, formatter: "{value}%", fontFamily: "IBM Plex Mono" },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: "读",
+        type: "line",
+        yAxisIndex: 0,
+        showSymbol: false,
+        lineStyle: { width: 1.4, color: c.cpu },
+        itemStyle: { color: c.cpu },
+        connectNulls: false,
+        data: gapAware(data, "diskRead"),
+      },
+      {
+        name: "写",
+        type: "line",
+        yAxisIndex: 0,
+        showSymbol: false,
+        lineStyle: { width: 1.4, color: c.mem },
+        itemStyle: { color: c.mem },
+        connectNulls: false,
+        data: gapAware(data, "diskWrite"),
+      },
+      {
+        name: "最高盘使用率",
+        type: "line",
+        yAxisIndex: 1,
+        showSymbol: false,
+        lineStyle: { width: 1.2, color: c.warn, type: "dashed" },
+        itemStyle: { color: c.warn },
+        connectNulls: false,
+        data: gapAware(data, "fsUsedMax"),
+      },
+    ],
+  };
+}
+
+function DiskChart({ data }: { data: SeriesResponse }) {
+  const host = useRef<HTMLDivElement | null>(null);
+  const chart = useRef<echarts.EChartsType | null>(null);
+  const { theme } = useTheme();
+  const hasData = data.points.some(
+    (point) =>
+      point.diskRead !== null || point.diskWrite !== null || point.fsUsedMax !== null,
+  );
+
+  useEffect(() => {
+    if (!host.current) return;
+    const instance = echarts.init(host.current, undefined, { renderer: "canvas" });
+    chart.current = instance;
+    const observer = new ResizeObserver(() => instance.resize());
+    observer.observe(host.current);
+    return () => {
+      observer.disconnect();
+      instance.dispose();
+      chart.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chart.current) return;
+    if (!hasData) {
+      chart.current.clear();
+      return;
+    }
+    chart.current.setOption(diskChartOption(data, theme), { notMerge: true });
+  }, [data, theme, hasData]);
+
+  if (!hasData) return null;
+  return (
+    <div className="chart-wrap gpu-chart-wrap">
+      <div className="chart disk-chart" ref={host} role="img" aria-label="磁盘吞吐与使用率图" />
+    </div>
+  );
+}
+
 function GpuCards({ gpus }: { gpus: SeriesResponse["latestGpus"] }) {
   if (gpus.length === 0) return null;
   return (
@@ -554,6 +692,14 @@ export function SeriesPanel({
             </span>
           )}
           {data.gpuCount > 0 && <span>{data.gpuCount} GPU</span>}
+          {(() => {
+            const peak = data.points.reduce(
+              (max, point) =>
+                point.fsUsedMax === null ? max : Math.max(max, point.fsUsedMax),
+              0,
+            );
+            return peak > 0 ? <span>盘峰值 {formatPercent(peak)}</span> : null;
+          })()}
           {data.malformed > 0 && (
             <span className="warn-text">解析失败 {data.malformed.toLocaleString()} 行</span>
           )}
@@ -600,6 +746,7 @@ export function SeriesPanel({
       <SeriesChart data={data} />
       {data && <GpuCards gpus={data.latestGpus} />}
       {data && <GpuChart data={data} />}
+      {data && <DiskChart data={data} />}
     </section>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, ClipboardCheck, Copy } from "lucide-react";
+import { ClipboardCheck, Copy } from "lucide-react";
 
 import { api } from "../api";
 import { DateRangeBar } from "./DateRangeBar";
@@ -7,6 +7,8 @@ import {
   formatDateTime,
   formatDuration,
   formatPercent,
+  formatRate,
+  formatRateCompact,
   relativeTime,
 } from "../format";
 import type {
@@ -17,6 +19,7 @@ import type {
 } from "../shared/types";
 
 const MAX_POINTS = "240";
+type Metric = "cpu" | "mem" | "gpuUtil" | "iowait" | "diskRead" | "diskWrite";
 
 const STATUS_LABEL: Record<OverviewServer["status"], string> = {
   online: "在线",
@@ -30,6 +33,10 @@ interface HostHistory {
   status: OverviewServer["status"];
   hostMeta: OverviewServer["hostMeta"];
   gpus: number;
+  points: SeriesPoint[];
+  fsMax: number | null;
+  diskRead: number | null;
+  diskWrite: number | null;
   cpuAvg: number | null;
   cpuP95: number | null;
   cpuMax: number | null;
@@ -46,7 +53,7 @@ interface HostHistory {
 
 function weighted(
   points: SeriesPoint[],
-  field: "cpu" | "mem" | "gpuUtil" | "iowait",
+  field: Metric,
 ): { avg: number | null; p95: number | null; max: number | null } {
   const rows: Array<{ value: number; weight: number }> = [];
   let sum = 0;
@@ -73,11 +80,7 @@ function weighted(
       break;
     }
   }
-  return {
-    avg: sum / weightSum,
-    p95,
-    max: max === -Infinity ? null : max,
-  };
+  return { avg: sum / weightSum, p95, max: max === -Infinity ? null : max };
 }
 
 function summarize(
@@ -92,13 +95,28 @@ function summarize(
   const mem = weighted(points, "mem");
   const gpu = weighted(points, "gpuUtil");
   const io = weighted(points, "iowait");
+  const read = weighted(points, "diskRead");
+  const write = weighted(points, "diskWrite");
   const lastPointMs = points.length > 0 ? Math.max(...points.map((p) => p.t)) : null;
+  const fsMax = points.reduce<number | null>(
+    (max, point) =>
+      point.fsUsedMax === null
+        ? max
+        : max === null
+          ? point.fsUsedMax
+          : Math.max(max, point.fsUsedMax),
+    null,
+  );
   return {
     alias: server.alias,
     mode: server.mode,
     status: server.status,
     hostMeta: server.hostMeta,
     gpus: server.gpus.length,
+    points,
+    fsMax,
+    diskRead: read.avg,
+    diskWrite: write.avg,
     cpuAvg: cpu.avg,
     cpuP95: cpu.p95,
     cpuMax: cpu.max,
@@ -114,16 +132,65 @@ function summarize(
   };
 }
 
+function Sparkline({ points }: { points: SeriesPoint[] }) {
+  const raw = points
+    .map((point) => point.cpu)
+    .filter((value): value is number => value !== null);
+  if (raw.length < 2) return null;
+  const step = Math.ceil(raw.length / 80);
+  const samples: number[] = [];
+  for (let i = 0; i < raw.length; i += step) {
+    const slice = raw.slice(i, i + step);
+    samples.push(slice.reduce((sum, value) => sum + value, 0) / slice.length);
+  }
+  const max = Math.max(...samples, 1);
+  const width = 100;
+  const height = 26;
+  const coords = samples.map((value, index) => {
+    const x = (index / Math.max(1, samples.length - 1)) * width;
+    const y = height - 2 - (value / max) * (height - 4);
+    return [x, y] as const;
+  });
+  const line = coords
+    .map(([x, y], index) => `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`)
+    .join(" ");
+  const area = `${line} L${width} ${height} L0 ${height} Z`;
+  return (
+    <svg
+      className="sparkline"
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <path d={area} className="spark-area" />
+      <path d={line} className="spark-line" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
+function MiniMeter({ value, tone }: { value: number | null; tone?: string }) {
+  return (
+    <span className={`meter ${tone ?? ""}`} aria-hidden="true">
+      <span
+        className="meter-fill"
+        style={{ width: `${value === null ? 0 : Math.max(0, Math.min(100, value))}%` }}
+      />
+    </span>
+  );
+}
+
 function buildSummary(rows: HostHistory[], from: string, to: string): string {
   const header =
-    "| 主机 | CPU 均值 | CPU p95 | 内存均值 | GPU 均值 | 覆盖 | 样本 | 最后数据 |\n|---|---|---|---|---|---|---|---|";
+    "| 主机 | CPU 均值 | CPU p95 | 内存均值 | GPU 均值 | 磁盘峰值 | 覆盖 | 样本 | 最后数据 |\n|---|---|---|---|---|---|---|---|---|";
   const body = rows.map(
     (row) =>
       `| ${row.alias}${row.hostMeta?.hostname ? ` (${row.hostMeta.hostname})` : ""} | ${
         formatPercent(row.cpuAvg)
       } | ${formatPercent(row.cpuP95)} | ${formatPercent(row.memAvg)} | ${
         row.gpuAvg === null ? "无 GPU" : formatPercent(row.gpuAvg)
-      } | ${row.coverage === null ? "—" : `${row.coverage}%`} | ${row.samples.toLocaleString()} | ${
+      } | ${formatPercent(row.fsMax)} | ${
+        row.coverage === null ? "—" : `${row.coverage}%`
+      } | ${row.samples.toLocaleString()} | ${
         row.lastPointMs === null ? "—" : formatDateTime(row.lastPointMs)
       } |`,
   );
@@ -182,9 +249,8 @@ export function FleetPanel({
     const controller = new AbortController();
     setScanning(true);
     setError(null);
-    const targets = servers;
     Promise.all(
-      targets.map(async (server) => {
+      servers.map(async (server) => {
         try {
           const series = await api.series(
             { server: server.alias, from, to, maxPoints: MAX_POINTS },
@@ -206,6 +272,10 @@ export function FleetPanel({
             status: server.status,
             hostMeta: server.hostMeta,
             gpus: server.gpus.length,
+            points: [],
+            fsMax: null,
+            diskRead: null,
+            diskWrite: null,
             cpuAvg: null,
             cpuP95: null,
             cpuMax: null,
@@ -244,10 +314,7 @@ export function FleetPanel({
         ? covered.reduce((sum, row) => sum + (row.coverage ?? 0), 0) / covered.length
         : null;
     const gpus = rows.reduce((sum, row) => sum + row.gpus, 0);
-    const largestGap = rows.reduce(
-      (max, row) => Math.max(max, row.largestGapSecs),
-      0,
-    );
+    const largestGap = rows.reduce((max, row) => Math.max(max, row.largestGapSecs), 0);
     const days =
       from && to
         ? Math.max(
@@ -336,77 +403,100 @@ export function FleetPanel({
         </div>
       )}
 
-      <div className="fleet fleet-history">
-        <div className="fleet-head" aria-hidden="true">
-          <span>主机</span>
-          <span>CPU 均值</span>
-          <span>CPU p95</span>
-          <span>内存均值</span>
-          <span>GPU 均值</span>
-          <span>覆盖</span>
-          <span>样本</span>
-          <span>最后数据</span>
-        </div>
-        {(rows ?? []).map((row) => (
-          <button
-            type="button"
-            className="fleet-row fleet-row-button"
-            key={row.alias}
-            onClick={() => onSelect(row.alias)}
-            aria-label={`查看 ${row.alias} 历史`}
-          >
-            <span className="fleet-host">
-              <span className="fleet-title">
-                <strong>{row.alias}</strong>
-                <span className={`status ${row.status}`}>
-                  <span className="status-dot" aria-hidden="true" />
-                  {STATUS_LABEL[row.status]}
+      <div className="fleet-scroll">
+        <div className="fleet fleet-history">
+          <div className="fleet-head" aria-hidden="true">
+            <span>主机</span>
+            <span>CPU 走势</span>
+            <span>内存</span>
+            <span>GPU</span>
+            <span>磁盘</span>
+            <span>覆盖</span>
+            <span>最后数据</span>
+          </div>
+          {(rows ?? []).map((row) => (
+            <button
+              type="button"
+              className="fleet-row fleet-row-button"
+              key={row.alias}
+              onClick={() => onSelect(row.alias)}
+              aria-label={`查看 ${row.alias} 历史`}
+            >
+              <span className="fleet-host">
+                <span className="fleet-title">
+                  <strong>{row.alias}</strong>
+                  <span className={`status ${row.status}`}>
+                    <span className="status-dot" aria-hidden="true" />
+                    {STATUS_LABEL[row.status]}
+                  </span>
+                </span>
+                <span className="fleet-sub">
+                  <span className="mono">{row.hostMeta?.hostname ?? "—"}</span>
+                  <span className="muted"> · {row.mode}</span>
+                </span>
+                {row.error && <span className="fleet-error">{row.error}</span>}
+              </span>
+
+              <span className="fleet-stat cpu-stat" data-label="CPU 走势">
+                <span className="cpu-line">
+                  <strong className="stat-value">{formatPercent(row.cpuAvg)}</strong>
+                  <span className="stat-note mono">p95 {formatPercent(row.cpuP95)}</span>
+                </span>
+                <Sparkline points={row.points} />
+              </span>
+
+              <span className="fleet-stat" data-label="内存">
+                <strong className="stat-value">{formatPercent(row.memAvg)}</strong>
+                <MiniMeter value={row.memAvg} tone="mem" />
+              </span>
+
+              <span className="fleet-stat" data-label="GPU">
+                <strong className="stat-value">
+                  {row.gpuAvg === null ? "无" : formatPercent(row.gpuAvg)}
+                </strong>
+                {row.gpus > 0 ? (
+                  <MiniMeter value={row.gpuAvg} tone="gpu" />
+                ) : (
+                  <span className="stat-note mono">无 GPU</span>
+                )}
+              </span>
+
+              <span className="fleet-stat" data-label="磁盘">
+                <strong
+                  className={`stat-value ${row.fsMax !== null && row.fsMax >= 90 ? "danger" : ""}`}
+                >
+                  {formatPercent(row.fsMax)}
+                </strong>
+                <MiniMeter value={row.fsMax} tone="disk" />
+                <span
+                  className="stat-note mono"
+                  title={`读 ${formatRate(row.diskRead)} · 写 ${formatRate(row.diskWrite)}`}
+                >
+                  ↓{formatRateCompact(row.diskRead)} ↑{formatRateCompact(row.diskWrite)}
                 </span>
               </span>
-              <span className="fleet-sub">
-                <span className="mono">{row.hostMeta?.hostname ?? "—"}</span>
-                <span className="muted"> · {row.mode}</span>
+
+              <span className="fleet-stat" data-label="覆盖">
+                <strong
+                  className={`stat-value ${
+                    row.coverage !== null && row.coverage < 80 ? "danger" : ""
+                  }`}
+                >
+                  {row.coverage === null ? "—" : `${row.coverage.toFixed(1)}%`}
+                </strong>
+                <span className="stat-note mono">
+                  {row.gaps > 0 ? `${row.gaps} 段缺口` : "连续"}
+                </span>
               </span>
-              {row.error && <span className="fleet-error">{row.error}</span>}
-            </span>
-            <span className="fleet-stat" data-label="CPU 均值">
-              <strong className="stat-value">{formatPercent(row.cpuAvg)}</strong>
-              <span className="stat-note mono">max {formatPercent(row.cpuMax)}</span>
-            </span>
-            <span className="fleet-stat" data-label="CPU p95">
-              <strong className="stat-value">{formatPercent(row.cpuP95)}</strong>
-            </span>
-            <span className="fleet-stat" data-label="内存均值">
-              <strong className="stat-value">{formatPercent(row.memAvg)}</strong>
-            </span>
-            <span className="fleet-stat" data-label="GPU 均值">
-              <strong className="stat-value">
-                {row.gpuAvg === null ? "无" : formatPercent(row.gpuAvg)}
-              </strong>
-              <span className="stat-note mono">
-                {row.gpus > 0 ? `${row.gpus} 张` : "无 GPU"}
+
+              <span className="fleet-time" data-label="最后数据">
+                <strong className="stat-time">{relativeTime(row.lastPointMs)}</strong>
+                <span className="stat-note mono">{formatDateTime(row.lastPointMs)}</span>
               </span>
-            </span>
-            <span className="fleet-stat" data-label="覆盖">
-              <strong className={`stat-value ${row.coverage !== null && row.coverage < 80 ? "danger" : ""}`}>
-                {row.coverage === null ? "—" : `${row.coverage.toFixed(1)}%`}
-              </strong>
-              <span className="stat-note mono">
-                {row.gaps > 0 ? `${row.gaps} 段缺口` : "连续"}
-              </span>
-            </span>
-            <span className="fleet-stat" data-label="样本">
-              <strong className="stat-value">{row.samples.toLocaleString()}</strong>
-            </span>
-            <span className="fleet-time" data-label="最后数据">
-              <strong className="stat-time">{relativeTime(row.lastPointMs)}</strong>
-              <span className="stat-note mono">{formatDateTime(row.lastPointMs)}</span>
-            </span>
-            <span className="fleet-chevron" aria-hidden="true">
-              <ArrowRight size={14} strokeWidth={1.6} />
-            </span>
-          </button>
-        ))}
+
+            </button>
+          ))}
+        </div>
       </div>
 
       {scanning && <p className="fleet-hint muted small">正在聚合所选范围…</p>}

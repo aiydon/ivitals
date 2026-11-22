@@ -39,6 +39,12 @@ interface Bucket {
   gpuPowerSum: number;
   gpuPowerN: number;
   gpuCount: number;
+  diskReadSum: number;
+  diskReadN: number;
+  diskWriteSum: number;
+  diskWriteN: number;
+  diskUtilMax: number | null;
+  fsUsedMax: number | null;
 }
 
 interface ScanMeta {
@@ -211,6 +217,12 @@ async function scanFile(
           gpuPowerSum: 0,
           gpuPowerN: 0,
           gpuCount: 0,
+          diskReadSum: 0,
+          diskReadN: 0,
+          diskWriteSum: 0,
+          diskWriteN: 0,
+          diskUtilMax: null,
+          fsUsedMax: null,
         };
         buckets.set(idx, b);
       }
@@ -249,6 +261,39 @@ async function scanFile(
       if (gpuPower !== null) {
         b.gpuPowerSum += gpuPower;
         b.gpuPowerN += 1;
+      }
+
+      if (Array.isArray(obj.disk_io)) {
+        let read = 0;
+        let write = 0;
+        let util = 0;
+        let count = 0;
+        for (const item of obj.disk_io) {
+          if (item === null || typeof item !== "object") continue;
+          const disk = item as Record<string, unknown>;
+          const r = num(disk.read_bytes_per_s);
+          const w = num(disk.write_bytes_per_s);
+          const u = num(disk.util_percent);
+          if (r !== null) read += r;
+          if (w !== null) write += w;
+          if (u !== null) util = Math.max(util, u);
+          count += 1;
+        }
+        if (count > 0) {
+          b.diskReadSum += read;
+          b.diskReadN += 1;
+          b.diskWriteSum += write;
+          b.diskWriteN += 1;
+          b.diskUtilMax = b.diskUtilMax === null ? util : Math.max(b.diskUtilMax, util);
+        }
+      }
+      if (Array.isArray(obj.filesystems)) {
+        for (const item of obj.filesystems) {
+          if (item === null || typeof item !== "object") continue;
+          const used = num((item as Record<string, unknown>).used_percent);
+          if (used === null) continue;
+          b.fsUsedMax = b.fsUsedMax === null ? used : Math.max(b.fsUsedMax, used);
+        }
       }
     }
   } catch (error) {
@@ -365,6 +410,10 @@ async function run(req: SeriesRequest): Promise<SeriesWorkerResult> {
       gpuTemp: b.gpuTempMax === null ? null : round(b.gpuTempMax, 1),
       gpuPower: b.gpuPowerN > 0 ? round(b.gpuPowerSum / b.gpuPowerN, 1) : null,
       gpuCount: b.gpuCount,
+      diskRead: b.diskReadN > 0 ? Math.round(b.diskReadSum / b.diskReadN) : null,
+      diskWrite: b.diskWriteN > 0 ? Math.round(b.diskWriteSum / b.diskWriteN) : null,
+      diskUtil: b.diskUtilMax === null ? null : round(b.diskUtilMax, 2),
+      fsUsedMax: b.fsUsedMax === null ? null : round(b.fsUsedMax),
       samples: b.samples,
     });
   }

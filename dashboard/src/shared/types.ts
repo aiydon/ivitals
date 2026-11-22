@@ -88,6 +88,9 @@ export interface OverviewServer {
   } | null;
   gpus: GpuInfo[];
   filesystems: FsInfo[];
+  diskReadBytesPerSec: number | null;
+  diskWriteBytesPerSec: number | null;
+  diskUtilPercent: number | null;
   hostMeta: HostMeta | null;
   error?: string;
 }
@@ -119,6 +122,10 @@ export interface SeriesPoint {
   gpuTemp: number | null;
   gpuPower: number | null;
   gpuCount: number;
+  diskRead: number | null;
+  diskWrite: number | null;
+  diskUtil: number | null;
+  fsUsedMax: number | null;
   samples: number;
 }
 

@@ -49,6 +49,23 @@ export function formatBytes(bytes: number | null): string {
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+export function formatRateCompact(bytesPerSecond: number | null): string {
+  if (bytesPerSecond === null) return "—";
+  const units = ["B", "K", "M", "G", "T"];
+  let value = bytesPerSecond;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)}${units[unit]}/s`;
+}
+
+export function formatRate(bytesPerSecond: number | null): string {
+  if (bytesPerSecond === null) return "—";
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
 export function formatPercent(value: number | null, digits = 1): string {
   return value === null ? "—" : `${value.toFixed(digits)}%`;
 }

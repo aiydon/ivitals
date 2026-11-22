@@ -184,6 +184,9 @@ interface LatestMetrics {
   gpu: OverviewServer["gpu"];
   gpus: GpuInfo[];
   filesystems: FsInfo[];
+  diskReadBytesPerSec: number | null;
+  diskWriteBytesPerSec: number | null;
+  diskUtilPercent: number | null;
   hostMeta: HostMeta | null;
   mtimeMs: number;
 }
@@ -304,6 +307,31 @@ function parseLatestMetrics(value: unknown, date: string, mtimeMs: number): Late
   const gpus = parseGpuList(gpuRaw.gpus, sample.gpu_detail);
   const message = typeof gpuRaw.message === "string" ? gpuRaw.message : undefined;
 
+  let diskRead: number | null = null;
+  let diskWrite: number | null = null;
+  let diskUtil: number | null = null;
+  if (Array.isArray(sample.disk_io)) {
+    let read = 0;
+    let write = 0;
+    let util = 0;
+    let count = 0;
+    for (const item of sample.disk_io) {
+      const disk = asRecord(item);
+      const r = finite(disk.read_bytes_per_s);
+      const w = finite(disk.write_bytes_per_s);
+      const u = finite(disk.util_percent);
+      if (r !== null) read += r;
+      if (w !== null) write += w;
+      if (u !== null) util = Math.max(util, u);
+      count += 1;
+    }
+    if (count > 0) {
+      diskRead = read;
+      diskWrite = write;
+      diskUtil = util;
+    }
+  }
+
   return {
     date,
     tsMs,
@@ -325,6 +353,9 @@ function parseLatestMetrics(value: unknown, date: string, mtimeMs: number): Late
     gpu: { state, count: gpus.length, message },
     gpus,
     filesystems: parseFilesystems(sample.filesystems),
+    diskReadBytesPerSec: diskRead,
+    diskWriteBytesPerSec: diskWrite,
+    diskUtilPercent: diskUtil,
     hostMeta: null,
     mtimeMs,
   };
@@ -402,6 +433,9 @@ async function buildOverview(): Promise<OverviewResponse> {
         gpu: null,
         gpus: [],
         filesystems: [],
+        diskReadBytesPerSec: null,
+        diskWriteBytesPerSec: null,
+        diskUtilPercent: null,
         hostMeta: host,
         error: "没有找到可解析的 metrics 记录",
       });
@@ -431,6 +465,9 @@ async function buildOverview(): Promise<OverviewResponse> {
       gpu: latest.gpu,
       gpus: latest.gpus,
       filesystems: latest.filesystems,
+      diskReadBytesPerSec: latest.diskReadBytesPerSec,
+      diskWriteBytesPerSec: latest.diskWriteBytesPerSec,
+      diskUtilPercent: latest.diskUtilPercent,
       hostMeta: host,
     });
   }

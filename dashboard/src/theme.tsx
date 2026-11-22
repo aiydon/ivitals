@@ -16,6 +16,7 @@ export interface ChartTheme {
   gpuMem: string;
   temp: string;
   power: string;
+  warn: string;
   heatmap: string[];
 }
 
@@ -33,6 +34,7 @@ const DARK: ChartTheme = {
   gpuMem: "#96a9c6",
   temp: "#e0836f",
   power: "#d9a45b",
+  warn: "#e0b268",
   heatmap: ["#35678a", "#3f8ba0", "#4fb09a", "#8bc46f", "#e0b268", "#e56767"],
 };
 
@@ -50,6 +52,7 @@ const LIGHT: ChartTheme = {
   gpuMem: "#607b9e",
   temp: "#c2553f",
   power: "#a86f22",
+  warn: "#a66a1f",
   heatmap: ["#b9d4e8", "#86bad7", "#4ea59f", "#86bd68", "#e0bb56", "#d96b4a"],
 };
 

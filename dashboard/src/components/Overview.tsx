@@ -3,6 +3,7 @@ import {
   formatDateTime,
   formatDuration,
   formatPercent,
+  formatRate,
   formatTime,
   relativeTime,
 } from "../format";
@@ -185,6 +186,14 @@ export function OverviewPanel({
             <h3>存储</h3>
             <span className="mono muted">{server.filesystems.length} 个挂载点</span>
           </div>
+          {(server.diskReadBytesPerSec !== null ||
+            server.diskWriteBytesPerSec !== null) && (
+            <div className="io-row mono">
+              <span>读 {formatRate(server.diskReadBytesPerSec)}</span>
+              <span>写 {formatRate(server.diskWriteBytesPerSec)}</span>
+              <span>util {formatPercent(server.diskUtilPercent, 1)}</span>
+            </div>
+          )}
           {server.filesystems.length === 0 ? (
             <div className="inset-empty">没有文件系统数据</div>
           ) : (
