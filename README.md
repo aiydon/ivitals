@@ -265,8 +265,8 @@ series and per-core heatmaps). The UI is a graphite instrument panel with a
 fleet overview that aggregates a chosen **local** date range for reporting, a
 host scope with its own tabs (no cross-host numeric comparison), dark/light
 themes, 60 s auto-refresh, one-click date presets, per-GPU detail, per-core
-occupancy heatmaps, filesystem capacity, GPU processes and explicit data-gap
-warnings. Date pickers and chart axes use the browser's local timezone while
+occupancy heatmaps, filesystem capacity, disk throughput plus filesystem-usage trends, GPU processes and
+explicit data-gap warnings. Date pickers and chart axes use the browser's local timezone while
 the on-disk partitions stay UTC. Visual direction follows
 [unslop](https://github.com/heydamir/unslop) by Damir Sokolovsky (CC BY 4.0).
 
