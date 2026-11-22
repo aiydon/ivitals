@@ -1,6 +1,6 @@
 # ivitals dashboard
 
-只读可视化看板：侧边栏集群导航、主机硬件身份、GPU/文件系统/多核统计、CPU/内存/iowait/GPU 时序、多核热力图、进程与 GPU 进程快照。视觉方向参考 [unslop](https://github.com/heydamir/unslop)（Damir Sokolovsky，CC BY 4.0）。
+只读可视化看板：集群总览（汇报用）、单机硬件身份、GPU/文件系统/多核统计、CPU/内存/iowait/GPU 时序、多核热力图、进程与 GPU 进程快照。视觉方向参考 [unslop](https://github.com/heydamir/unslop)（Damir Sokolovsky，CC BY 4.0）。
 
 ## 技术栈
 
@@ -8,7 +8,10 @@
 - **React 19 + ECharts 6**：前端
 - **Worker + `readline` 流式扫描**：时序与多核查询分别在独立 Worker 中逐行解析 JSONL，
   按时间桶聚合，内存占用与文件大小无关，不阻塞 API 事件循环
+- **集群总览**：在线数、总核数、GPU、内存、采样/保留、异常清单，一键复制 Markdown 摘要
 - **主机独立视图**：sidebar 选择主机，所有面板只显示该主机；不做跨机数值对比
+- **日期选择**：最新一天 / 最近 3 天 / 最近 7 天 / 全部 一键切换，原始输入放在“自定义”里；
+  进程快照用带星期的下拉日期
 - **深色 / 浅色**：跟随系统，可手动切换并持久化
 - **自动刷新**：overview 30s，时序/多核/进程 60s；缺口检测会显示中断区间，图表在缺口处断开
 - **进程详情**：表格行可展开，查看用户/UID、父进程、完整命令行、工作目录 `cwd`、可执行文件 `exe`
@@ -19,14 +22,18 @@
 
 ```bash
 make install   # cd dashboard && bun install
-make dev       # http://127.0.0.1:8899
+make dev       # http://<LAN-IP>:8899（默认绑定 0.0.0.0）
 make build     # dashboard/dist（生产静态文件）
 make start     # 生产模式，读取 dashboard/dist
 make clean     # 仅删除 dashboard/dist，不触碰 ../data
 ```
 
 开发模式使用 Bun 的 HTML import 自动打包；生产模式由 `src/server.ts` 直接托管
-`dashboard/dist`。端口/监听地址可用 `PORT`、`HOST` 覆盖。
+`dashboard/dist`。端口/监听地址可用 `PORT`、`HOST` 覆盖；默认 `0.0.0.0:8899`，
+启动日志会打印所有内网地址。
+
+**安全**：看板没有鉴权，会暴露主机名、进程命令行和路径。只在可信内网使用，
+或放到带鉴权的反向代理后面；`data/` 的读权限也应限制在同样范围。
 
 ## 只读保证
 
@@ -51,6 +58,7 @@ make clean     # 仅删除 dashboard/dist，不触碰 ../data
 IVITALS_CONFIG=/path/to/config.toml \
 IVITALS_DATA_DIR=/path/to/data \
 PORT=9000 \
+HOST=127.0.0.1 \
 bun src/server.ts
 ```
 

@@ -262,18 +262,27 @@ duckdb -c "SELECT ts_ms, server, d.device, d.util_percent, d.await_ms
 to the data directory and reads JSONL incrementally (tail reads for the
 overview/process snapshot; Workers + streaming line readers for GPU/time
 series and per-core heatmaps). The UI is a graphite instrument panel with a
-host switcher, per-host views (no cross-host comparison), dark/light themes,
-60 s auto-refresh, per-GPU detail, per-core occupancy heatmaps, filesystem
-capacity, GPU processes and explicit data-gap warnings. Visual direction follows
+fleet overview for reporting, a host switcher, per-host detail views (no
+cross-host numeric comparison), dark/light themes, 60 s auto-refresh, one-click
+date presets, per-GPU detail, per-core occupancy heatmaps, filesystem capacity,
+GPU processes and explicit data-gap warnings. Visual direction follows
 [unslop](https://github.com/heydamir/unslop) by Damir Sokolovsky (CC BY 4.0).
 
 ```bash
 make install   # bun install
-make dev       # http://127.0.0.1:8899
+make dev       # binds 0.0.0.0:8899 by default
 make build     # dashboard/dist
 make start     # serve the production build
 make clean     # removes dashboard/dist only — never data/
 ```
+
+The server binds to `0.0.0.0` so the internal network can reach it; the startup
+log prints every LAN URL. Override with `HOST=127.0.0.1` or `PORT=...`.
+
+**Security:** the dashboard has no authentication and exposes hostnames, process
+command lines and filesystem paths. Run it only on a trusted network (or put it
+behind an authenticated reverse proxy), and keep `data/` readable to that
+audience only.
 
 See `dashboard/README.md` for the API, environment overrides
 (`IVITALS_CONFIG`, `IVITALS_DATA_DIR`, `PORT`, `HOST`) and scan limits.
