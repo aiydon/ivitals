@@ -21,6 +21,7 @@ import {
   discoverAliases,
   fileSize,
   isValidDate,
+  lastJsonRecordWithin,
   listDates,
   loadConfig,
   tailJsonRecord,
@@ -127,13 +128,15 @@ async function guard(fn: () => Promise<unknown>): Promise<Response> {
   }
 }
 
-async function buildMeta(): Promise<MetaResponse> {
+async function buildMeta(url: URL): Promise<MetaResponse> {
+  const tzOffset = readTz(url);
   const cfg = await loadConfig();
-  const dates = await listDates();
-  const discovered = await discoverAliases(dates);
+  const utcDates = await listDates();
+  const dates = localDatesFromUtc(utcDates, tzOffset);
+  const discovered = await discoverAliases(utcDates);
   const warnings = [...cfg.warnings];
   if (cfg.error) warnings.unshift(cfg.error);
-  if (dates.length === 0) {
+  if (utcDates.length === 0) {
     warnings.push(`数据目录中没有 YYYY-MM-DD 子目录: ${DATA_DIR}`);
   }
 
@@ -533,7 +536,52 @@ function runCoresWorker(req: CoresRequest): Promise<CoresWorkerResult> {
   return promise;
 }
 
-function calendarDates(from: string, to: string): string[] {
+const TZ_LIMIT_MIN = 840;
+
+/** Minutes east of UTC; the dashboard always works in local calendar days. */
+function readTz(url: URL): number {
+  const raw = url.searchParams.get("tzOffset");
+  if (raw === null || raw === "") return 0;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || Math.abs(value) > TZ_LIMIT_MIN) {
+    throw new HttpError(400, "tzOffset 必须是 -840..840 的分钟数");
+  }
+  return Math.round(value);
+}
+
+/** UTC instant of local midnight for a local `YYYY-MM-DD`. */
+function localDayStartMs(date: string, tzOffset: number): number {
+  return dayStartMs(date) - tzOffset * 60_000;
+}
+
+/** Local calendar date of a UTC instant. */
+function localDateOf(ms: number, tzOffset: number): string {
+  return new Date(ms + tzOffset * 60_000).toISOString().slice(0, 10);
+}
+
+/** UTC partition directories that overlap a local date range. */
+function utcDatesCovering(from: string, to: string, tzOffset: number): string[] {
+  const start = localDayStartMs(from, tzOffset);
+  const end = localDayStartMs(to, tzOffset) + DAY_MS;
+  const out = new Set<string>();
+  for (let t = Math.floor(start / DAY_MS) * DAY_MS; t < end; t += DAY_MS) {
+    out.add(new Date(t).toISOString().slice(0, 10));
+  }
+  return [...out].sort();
+}
+
+/** Local dates touched by the available UTC partitions. */
+function localDatesFromUtc(utcDates: string[], tzOffset: number): string[] {
+  const out = new Set<string>();
+  for (const date of utcDates) {
+    const start = dayStartMs(date);
+    out.add(localDateOf(start, tzOffset));
+    out.add(localDateOf(start + DAY_MS - 1, tzOffset));
+  }
+  return [...out].sort().reverse();
+}
+
+function localDays(from: string, to: string): string[] {
   const out: string[] = [];
   const end = dayStartMs(to);
   for (let t = dayStartMs(from); t <= end; t += DAY_MS) {
@@ -542,13 +590,16 @@ function calendarDates(from: string, to: string): string[] {
   return out;
 }
 
+
 async function buildSeries(url: URL): Promise<SeriesResponse> {
   const server = url.searchParams.get("server") ?? "";
   if (!ALIAS_RE.test(server)) throw new HttpError(400, "server 参数缺失或非法");
-  const dates = await listDates();
-  if (dates.length === 0) throw new HttpError(404, `数据目录为空或不可读: ${DATA_DIR}`);
+  const tzOffset = readTz(url);
+  const utcDates = await listDates();
+  if (utcDates.length === 0) throw new HttpError(404, `数据目录为空或不可读: ${DATA_DIR}`);
+  const localDates = localDatesFromUtc(utcDates, tzOffset);
 
-  const to = url.searchParams.get("to") ?? dates[0];
+  const to = url.searchParams.get("to") ?? localDates[0];
   const from = url.searchParams.get("from") ?? to;
   if (!isValidDate(from) || !isValidDate(to)) {
     throw new HttpError(400, "from/to 必须是 YYYY-MM-DD 日期");
@@ -560,15 +611,16 @@ async function buildSeries(url: URL): Promise<SeriesResponse> {
   }
   const maxPoints = intParam(url.searchParams.get("maxPoints"), 1200, 100, 4000, "maxPoints");
 
-  const allDates = calendarDates(from, to);
-  const files = allDates.map((date) => ({
+  const utcFiles = utcDatesCovering(from, to, tzOffset);
+  const files = utcFiles.map((date) => ({
     date,
     path: dataFile(date, server, "metrics"),
   }));
   const sizes = await Promise.all(files.map((f) => fileSize(f.path)));
+  const sizeByUtc = new Map(utcFiles.map((date, index) => [date, sizes[index]]));
   const existing = files.filter((_, index) => sizes[index] !== null);
   if (existing.length === 0) {
-    const discovered = await discoverAliases(dates);
+    const discovered = await discoverAliases(utcDates);
     throw new HttpError(
       404,
       `服务器 ${server} 在 ${from}..${to} 没有 metrics 文件；请检查别名或日期。存在数据的别名: ${
@@ -577,8 +629,8 @@ async function buildSeries(url: URL): Promise<SeriesResponse> {
     );
   }
 
-  const fromMs = dayStartMs(from);
-  const toMs = dayStartMs(to) + DAY_MS;
+  const fromMs = localDayStartMs(from, tzOffset);
+  const toMs = localDayStartMs(to, tzOffset) + DAY_MS;
   const spanMs = toMs - fromMs;
   const bucketSecs = Math.max(5, Math.ceil(spanMs / maxPoints / 1000 / 5) * 5);
   const started = performance.now();
@@ -591,6 +643,10 @@ async function buildSeries(url: URL): Promise<SeriesResponse> {
     maxBytes: MAX_SCAN_BYTES,
   });
 
+  const missingLocal = localDays(from, to).filter((date) =>
+    utcDatesCovering(date, date, tzOffset).every((utc) => sizeByUtc.get(utc) === null),
+  );
+
   return {
     server,
     from,
@@ -599,7 +655,7 @@ async function buildSeries(url: URL): Promise<SeriesResponse> {
     points: result.points,
     samples: result.samples,
     malformed: result.malformed,
-    missingDates: result.missingDates,
+    missingDates: missingLocal,
     truncated: result.truncated,
     scanMs: Math.round(performance.now() - started),
     warnings: result.warnings,
@@ -616,31 +672,44 @@ async function buildSeries(url: URL): Promise<SeriesResponse> {
 async function buildProcesses(url: URL): Promise<ProcessesResponse> {
   const server = url.searchParams.get("server") ?? "";
   if (!ALIAS_RE.test(server)) throw new HttpError(400, "server 参数缺失或非法");
-  const dates = await listDates();
-  const date = url.searchParams.get("date") ?? dates[0] ?? "";
+  const tzOffset = readTz(url);
+  const utcDates = await listDates();
+  const localDates = localDatesFromUtc(utcDates, tzOffset);
+  const date = url.searchParams.get("date") ?? localDates[0] ?? "";
   if (!isValidDate(date)) throw new HttpError(400, "date 必须是 YYYY-MM-DD 日期");
   const topN = intParam(url.searchParams.get("top"), 20, 1, 100, "top");
 
-  const path = dataFile(date, server, "processes");
-  if ((await fileSize(path)) === null) {
-    const discovered = await discoverAliases(dates);
+  const startMs = localDayStartMs(date, tzOffset);
+  const endMs = startMs + DAY_MS;
+  let best: { tsMs: number; snapshot: Record<string, unknown> } | null = null;
+  let sawFile = false;
+  for (const utcDate of utcDatesCovering(date, date, tzOffset).reverse()) {
+    const path = dataFile(utcDate, server, "processes");
+    if ((await fileSize(path)) === null) continue;
+    sawFile = true;
+    const tail = await lastJsonRecordWithin(path, startMs, endMs);
+    if (!tail) continue;
+    const candidate = asRecord(tail.value);
+    const ts = finite(candidate.ts_ms);
+    if (ts === null || ts < startMs || ts >= endMs) continue;
+    if (!best || ts > best.tsMs) best = { tsMs: ts, snapshot: candidate };
+  }
+  if (!best) {
+    const discovered = await discoverAliases(utcDates);
+    const detail = sawFile
+      ? `文件存在，但该本地日没有完整快照（采集可能中断）`
+      : `该本地日没有进程快照文件`;
     throw new HttpError(
       404,
-      `服务器 ${server} 在 ${date} 没有进程快照文件。可用日期: ${
-        dates.slice(0, 8).join(", ") || "无"
+      `服务器 ${server} 在 ${date}：${detail}。可用日期: ${
+        localDates.slice(0, 8).join(", ") || "无"
       }；存在数据的别名: ${discovered.join(", ") || "无"}`,
     );
   }
-  const tail = await tailJsonRecord(path, 2 * 1024 * 1024);
-  if (!tail) {
-    throw new HttpError(
-      404,
-      `${server} ${date} 的进程文件为空，或最后一行尚未写完（采集端 30s 内会 flush）`,
-    );
-  }
-  const snapshot = asRecord(tail.value);
-  const tsMs = finite(snapshot.ts_ms);
-  if (tsMs === null || !Array.isArray(snapshot.processes)) {
+
+  const snapshot = best.snapshot;
+  const tsMs = best.tsMs;
+  if (!Array.isArray(snapshot.processes)) {
     throw new HttpError(422, `${server} ${date} 的进程快照格式不正确`);
   }
 
@@ -715,10 +784,12 @@ async function buildProcesses(url: URL): Promise<ProcessesResponse> {
 async function buildCores(url: URL): Promise<CoresResponse> {
   const server = url.searchParams.get("server") ?? "";
   if (!ALIAS_RE.test(server)) throw new HttpError(400, "server 参数缺失或非法");
-  const dates = await listDates();
-  if (dates.length === 0) throw new HttpError(404, `数据目录为空或不可读: ${DATA_DIR}`);
+  const tzOffset = readTz(url);
+  const utcDates = await listDates();
+  if (utcDates.length === 0) throw new HttpError(404, `数据目录为空或不可读: ${DATA_DIR}`);
+  const localDates = localDatesFromUtc(utcDates, tzOffset);
 
-  const to = url.searchParams.get("to") ?? dates[0];
+  const to = url.searchParams.get("to") ?? localDates[0];
   const from = url.searchParams.get("from") ?? to;
   if (!isValidDate(from) || !isValidDate(to)) {
     throw new HttpError(400, "from/to 必须是 YYYY-MM-DD 日期");
@@ -729,7 +800,8 @@ async function buildCores(url: URL): Promise<CoresResponse> {
     throw new HttpError(400, `单次最多查询 ${MAX_RANGE_DAYS} 个日历日`);
   }
   const maxFrames = intParam(url.searchParams.get("maxFrames"), 240, 40, 800, "maxFrames");
-  const files = calendarDates(from, to).map((date) => ({
+  const utcFiles = utcDatesCovering(from, to, tzOffset);
+  const files = utcFiles.map((date) => ({
     date,
     path: dataFile(date, server, "metrics"),
   }));
@@ -740,9 +812,10 @@ async function buildCores(url: URL): Promise<CoresResponse> {
       `服务器 ${server} 在 ${from}..${to} 没有 metrics 文件`,
     );
   }
+  const sizeByUtc = new Map(utcFiles.map((date, index) => [date, sizes[index]]));
 
-  const fromMs = dayStartMs(from);
-  const toMs = dayStartMs(to) + DAY_MS;
+  const fromMs = localDayStartMs(from, tzOffset);
+  const toMs = localDayStartMs(to, tzOffset) + DAY_MS;
   const spanMs = toMs - fromMs;
   const bucketSecs = Math.max(5, Math.ceil(spanMs / maxFrames / 1000 / 5) * 5);
   const started = performance.now();
@@ -754,6 +827,10 @@ async function buildCores(url: URL): Promise<CoresResponse> {
     maxLines: MAX_SCAN_LINES,
     maxBytes: MAX_SCAN_BYTES,
   });
+  const missingLocal = localDays(from, to).filter((date) =>
+    utcDatesCovering(date, date, tzOffset).every((utc) => sizeByUtc.get(utc) === null),
+  );
+
   return {
     server,
     from,
@@ -765,7 +842,7 @@ async function buildCores(url: URL): Promise<CoresResponse> {
     max: result.max,
     samples: result.samples,
     malformed: result.malformed,
-    missingDates: result.missingDates,
+    missingDates: missingLocal,
     truncated: result.truncated,
     scanMs: Math.round(performance.now() - started),
     warnings: result.warnings,
@@ -799,7 +876,7 @@ async function serveDist(pathname: string): Promise<Response> {
 }
 
 const apiRoutes = {
-  "/api/meta": () => guard(buildMeta),
+  "/api/meta": (req: Request) => guard(() => buildMeta(new URL(req.url))),
   "/api/overview": () => guard(buildOverview),
   "/api/series": (req: Request) => guard(() => buildSeries(new URL(req.url))),
   "/api/cores": (req: Request) => guard(() => buildCores(new URL(req.url))),

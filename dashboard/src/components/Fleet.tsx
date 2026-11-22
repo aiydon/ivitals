@@ -1,14 +1,22 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, ClipboardCheck, Copy } from "lucide-react";
 
+import { api } from "../api";
+import { DateRangeBar } from "./DateRangeBar";
 import {
-  formatBytes,
   formatDateTime,
   formatDuration,
   formatPercent,
   relativeTime,
 } from "../format";
-import type { MetaResponse, OverviewResponse, OverviewServer } from "../shared/types";
+import type {
+  MetaResponse,
+  OverviewResponse,
+  OverviewServer,
+  SeriesPoint,
+} from "../shared/types";
+
+const MAX_POINTS = "240";
 
 const STATUS_LABEL: Record<OverviewServer["status"], string> = {
   online: "在线",
@@ -16,49 +24,110 @@ const STATUS_LABEL: Record<OverviewServer["status"], string> = {
   "no-data": "无数据",
 };
 
-function gpuLabel(server: OverviewServer): string {
-  if (!server.gpu) return "—";
-  if (server.gpu.state === "error") return "错误";
-  if (server.gpu.state === "absent") return "无";
-  const util = Math.max(...server.gpus.map((gpu) => gpu.utilPercent), 0);
-  return `${server.gpus.length} × ${util.toFixed(0)}%`;
+interface HostHistory {
+  alias: string;
+  mode: string;
+  status: OverviewServer["status"];
+  hostMeta: OverviewServer["hostMeta"];
+  gpus: number;
+  cpuAvg: number | null;
+  cpuP95: number | null;
+  cpuMax: number | null;
+  memAvg: number | null;
+  gpuAvg: number | null;
+  ioAvg: number | null;
+  coverage: number | null;
+  samples: number;
+  gaps: number;
+  largestGapSecs: number;
+  lastPointMs: number | null;
+  error: string | null;
 }
 
-function gpuNote(server: OverviewServer): string {
-  if (server.gpu?.state === "ok") {
-    const vram = server.gpus.reduce((sum, gpu) => sum + gpu.memUsedMb, 0);
-    const total = server.gpus.reduce((sum, gpu) => sum + gpu.memTotalMb, 0);
-    return total > 0 ? `VRAM ${((vram / total) * 100).toFixed(0)}%` : "—";
+function weighted(
+  points: SeriesPoint[],
+  field: "cpu" | "mem" | "gpuUtil" | "iowait",
+): { avg: number | null; p95: number | null; max: number | null } {
+  const rows: Array<{ value: number; weight: number }> = [];
+  let sum = 0;
+  let weightSum = 0;
+  let max = -Infinity;
+  for (const point of points) {
+    const value = point[field];
+    if (value === null) continue;
+    const weight = Math.max(1, point.samples);
+    rows.push({ value, weight });
+    sum += value * weight;
+    weightSum += weight;
+    max = Math.max(max, value);
   }
-  if (server.gpu?.state === "error") return server.gpu.message ?? "探测失败";
-  return "未检测到 NVIDIA GPU";
+  if (rows.length === 0) return { avg: null, p95: null, max: null };
+  rows.sort((a, b) => a.value - b.value);
+  const target = weightSum * 0.95;
+  let accumulated = 0;
+  let p95 = rows[rows.length - 1].value;
+  for (const row of rows) {
+    accumulated += row.weight;
+    if (accumulated >= target) {
+      p95 = row.value;
+      break;
+    }
+  }
+  return {
+    avg: sum / weightSum,
+    p95,
+    max: max === -Infinity ? null : max,
+  };
 }
 
-function hostAlert(server: OverviewServer): string | null {
-  if (server.status === "no-data") return "没有可解析的 metrics";
-  if (server.status === "stale") return "最后采样已超出过期窗口";
-  if (server.gpu?.state === "error") return server.gpu.message ?? "GPU 探测失败";
-  return null;
+function summarize(
+  server: OverviewServer,
+  points: SeriesPoint[],
+  coverage: number | null,
+  samples: number,
+  gaps: number,
+  largestGapSecs: number,
+): HostHistory {
+  const cpu = weighted(points, "cpu");
+  const mem = weighted(points, "mem");
+  const gpu = weighted(points, "gpuUtil");
+  const io = weighted(points, "iowait");
+  const lastPointMs = points.length > 0 ? Math.max(...points.map((p) => p.t)) : null;
+  return {
+    alias: server.alias,
+    mode: server.mode,
+    status: server.status,
+    hostMeta: server.hostMeta,
+    gpus: server.gpus.length,
+    cpuAvg: cpu.avg,
+    cpuP95: cpu.p95,
+    cpuMax: cpu.max,
+    memAvg: mem.avg,
+    gpuAvg: gpu.avg,
+    ioAvg: io.avg,
+    coverage,
+    samples,
+    gaps,
+    largestGapSecs,
+    lastPointMs,
+    error: null,
+  };
 }
 
-function buildSummary(servers: OverviewServer[]): string {
+function buildSummary(rows: HostHistory[], from: string, to: string): string {
   const header =
-    "| 主机 | 状态 | CPU | 内存 | GPU | 核数 | 最后采样 |\n|---|---|---|---|---|---|---|";
-  const rows = servers.map((server) => {
-    const host = server.hostMeta;
-    const gpu =
-      server.gpu?.state === "ok"
-        ? `${server.gpus.length} × ${Math.max(...server.gpus.map((g) => g.utilPercent), 0).toFixed(0)}%`
-        : server.gpu?.state === "error"
-          ? "错误"
-          : "无";
-    return `| ${server.alias}${host?.hostname ? ` (${host.hostname})` : ""} | ${
-      STATUS_LABEL[server.status]
-    } | ${formatPercent(server.cpuPercent)} | ${formatPercent(server.memUsedPercent)} | ${gpu} | ${
-      server.coreCount ?? "—"
-    } | ${formatDateTime(server.lastSeenMs)} |`;
-  });
-  return [header, ...rows].join("\n");
+    "| 主机 | CPU 均值 | CPU p95 | 内存均值 | GPU 均值 | 覆盖 | 样本 | 最后数据 |\n|---|---|---|---|---|---|---|---|";
+  const body = rows.map(
+    (row) =>
+      `| ${row.alias}${row.hostMeta?.hostname ? ` (${row.hostMeta.hostname})` : ""} | ${
+        formatPercent(row.cpuAvg)
+      } | ${formatPercent(row.cpuP95)} | ${formatPercent(row.memAvg)} | ${
+        row.gpuAvg === null ? "无 GPU" : formatPercent(row.gpuAvg)
+      } | ${row.coverage === null ? "—" : `${row.coverage}%`} | ${row.samples.toLocaleString()} | ${
+        row.lastPointMs === null ? "—" : formatDateTime(row.lastPointMs)
+      } |`,
+  );
+  return [`统计范围：${from} → ${to}（本地日期）`, "", header, ...body].join("\n");
 }
 
 function Kpi({
@@ -83,58 +152,139 @@ export function FleetPanel({
   overview,
   meta,
   loading,
+  reloadToken,
   onSelect,
 }: {
   overview: OverviewResponse | null;
   meta: MetaResponse;
   loading: boolean;
+  reloadToken: number;
   onSelect: (alias: string) => void;
 }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [rows, setRows] = useState<HostHistory[] | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<"idle" | "ok" | "manual">("idle");
+
+  useEffect(() => {
+    const latest = meta.dates[0] ?? "";
+    setFrom((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
+    setTo((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
+  }, [meta]);
+
   const servers = overview?.servers ?? [];
+  const serverKey = servers.map((server) => server.alias).join(",");
+
+  useEffect(() => {
+    if (!from || !to || servers.length === 0) return;
+    const controller = new AbortController();
+    setScanning(true);
+    setError(null);
+    const targets = servers;
+    Promise.all(
+      targets.map(async (server) => {
+        try {
+          const series = await api.series(
+            { server: server.alias, from, to, maxPoints: MAX_POINTS },
+            controller.signal,
+          );
+          return summarize(
+            server,
+            series.points,
+            series.coveragePercent,
+            series.samples,
+            series.gaps.length,
+            series.largestGapSecs,
+          );
+        } catch (cause) {
+          if (controller.signal.aborted) throw cause;
+          return {
+            alias: server.alias,
+            mode: server.mode,
+            status: server.status,
+            hostMeta: server.hostMeta,
+            gpus: server.gpus.length,
+            cpuAvg: null,
+            cpuP95: null,
+            cpuMax: null,
+            memAvg: null,
+            gpuAvg: null,
+            ioAvg: null,
+            coverage: null,
+            samples: 0,
+            gaps: 0,
+            largestGapSecs: 0,
+            lastPointMs: null,
+            error: cause instanceof Error ? cause.message : String(cause),
+          } satisfies HostHistory;
+        }
+      }),
+    )
+      .then((result) => setRows(result))
+      .catch((cause) => {
+        if (!controller.signal.aborted) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setScanning(false);
+      });
+    return () => controller.abort();
+    // serverKey tracks host-set changes without depending on object identity.
+  }, [from, to, serverKey, reloadToken]);
 
   const totals = useMemo(() => {
-    const online = servers.filter((server) => server.status === "online").length;
-    const cores = servers.reduce(
-      (sum, server) => sum + (server.coreCount ?? server.hostMeta?.coreCount ?? 0),
+    if (!rows) return null;
+    const samples = rows.reduce((sum, row) => sum + row.samples, 0);
+    const covered = rows.filter((row) => row.coverage !== null);
+    const coverage =
+      covered.length > 0
+        ? covered.reduce((sum, row) => sum + (row.coverage ?? 0), 0) / covered.length
+        : null;
+    const gpus = rows.reduce((sum, row) => sum + row.gpus, 0);
+    const largestGap = rows.reduce(
+      (max, row) => Math.max(max, row.largestGapSecs),
       0,
     );
-    const gpus = servers.reduce((sum, server) => sum + server.gpus.length, 0);
-    const memBytes = servers.reduce(
-      (sum, server) => sum + (server.hostMeta?.memTotalBytes ?? server.memTotalBytes ?? 0),
-      0,
-    );
-    const alerts = servers.filter((server) => hostAlert(server) !== null);
-    return { online, cores, gpus, memBytes, alerts };
-  }, [servers]);
+    const days =
+      from && to
+        ? Math.max(
+            1,
+            Math.round(
+              (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) /
+                86_400_000,
+            ) + 1,
+          )
+        : 0;
+    return { samples, coverage, gpus, largestGap, days };
+  }, [rows, from, to]);
 
   const copySummary = async () => {
-    const text = buildSummary(servers);
+    if (!rows) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(buildSummary(rows, from, to));
       setCopied("ok");
     } catch {
-      // Plain-http LAN origins have no Clipboard API; fall back to a
-      // selection so the summary can still be copied by hand.
       setCopied("manual");
     }
     setTimeout(() => setCopied("idle"), 2500);
   };
 
-  if (loading) return <div className="empty-state">正在汇总所有主机</div>;
+  if (loading) return <div className="empty-state">正在读取主机清单</div>;
 
   return (
     <section className="panel">
       <div className="section-head">
         <div>
-          <h2>总览</h2>
+          <h2>历史分析</h2>
           <p className="section-sub">
-            {servers.length} 台主机 · 数据 {meta.dates.length} 天
-            {meta.dates.length > 0 ? `（${meta.dates[meta.dates.length - 1]} 起）` : ""}
+            按时间范围聚合每台主机，用于复盘；右上状态点只表示当前是否在线
           </p>
         </div>
         <div className="section-actions">
-          <button className="ghost" onClick={copySummary} disabled={servers.length === 0}>
+          <button className="ghost" onClick={copySummary} disabled={!rows}>
             {copied === "ok" ? (
               <ClipboardCheck size={14} strokeWidth={1.6} aria-hidden="true" />
             ) : (
@@ -145,116 +295,112 @@ export function FleetPanel({
         </div>
       </div>
 
-      <div className="kpi-strip">
-        <Kpi
-          label="在线"
-          value={`${totals.online} / ${servers.length}`}
-          note={totals.alerts.length > 0 ? `${totals.alerts.length} 项异常` : "全部正常"}
-        />
-        <Kpi label="总核数" value={totals.cores.toLocaleString()} note="逻辑核心" />
-        <Kpi label="GPU" value={String(totals.gpus)} note="已识别 NVIDIA GPU" />
-        <Kpi label="内存总量" value={formatBytes(totals.memBytes)} note="所有主机合计" />
-        <Kpi
-          label="采样"
-          value={`${meta.intervalSecs}s`}
-          note={`快照 ${meta.processIntervalSecs}s`}
-        />
-        <Kpi
-          label="保留"
-          value={`${meta.retentionDays} 天`}
-          note={overview ? `更新于 ${formatDateTime(overview.generatedAt)}` : "读取中"}
-        />
-      </div>
+      <DateRangeBar
+        dates={meta.dates}
+        from={from}
+        to={to}
+        ariaPrefix="统计"
+        onChange={(nextFrom, nextTo) => {
+          setFrom(nextFrom);
+          setTo(nextTo);
+        }}
+      />
 
-      {totals.alerts.length > 0 && (
-        <div className="notice warn">
-          <strong>需要关注</strong>
-          <ul>
-            {totals.alerts.map((server) => (
-              <li key={server.alias}>
-                <button className="inline-link" onClick={() => onSelect(server.alias)}>
-                  {server.alias}
-                </button>
-                ：{hostAlert(server)}
-              </li>
-            ))}
-          </ul>
+      {error && (
+        <div className="notice error">
+          <strong>统计失败</strong>
+          <p>{error}</p>
         </div>
       )}
 
-      <div className="fleet">
+      {totals && (
+        <div className="kpi-strip">
+          <Kpi
+            label="统计窗口"
+            value={`${totals.days} 天`}
+            note={`${from.slice(5)} → ${to.slice(5)}`}
+          />
+          <Kpi label="主机" value={String(rows?.length ?? 0)} note="参与聚合" />
+          <Kpi label="总样本" value={totals.samples.toLocaleString()} note="metrics 行数" />
+          <Kpi
+            label="平均覆盖"
+            value={totals.coverage === null ? "—" : `${totals.coverage.toFixed(1)}%`}
+            note="按主机平均"
+          />
+          <Kpi label="GPU" value={String(totals.gpus)} note="当前识别数量" />
+          <Kpi
+            label="最长缺口"
+            value={totals.largestGap > 0 ? formatDuration(totals.largestGap * 1000) : "无"}
+            note={totals.largestGap > 0 ? "采集中断" : "数据连续"}
+          />
+        </div>
+      )}
+
+      <div className="fleet fleet-history">
         <div className="fleet-head" aria-hidden="true">
           <span>主机</span>
-          <span>状态</span>
-          <span>CPU</span>
-          <span>内存</span>
-          <span>GPU</span>
-          <span>核数</span>
-          <span>运行时间</span>
-          <span>最后采样</span>
+          <span>CPU 均值</span>
+          <span>CPU p95</span>
+          <span>内存均值</span>
+          <span>GPU 均值</span>
+          <span>覆盖</span>
+          <span>样本</span>
+          <span>最后数据</span>
         </div>
-        {servers.map((server) => (
+        {(rows ?? []).map((row) => (
           <button
             type="button"
             className="fleet-row fleet-row-button"
-            key={server.alias}
-            onClick={() => onSelect(server.alias)}
-            aria-label={`查看 ${server.alias} 详情`}
+            key={row.alias}
+            onClick={() => onSelect(row.alias)}
+            aria-label={`查看 ${row.alias} 历史`}
           >
             <span className="fleet-host">
               <span className="fleet-title">
-                <strong>{server.alias}</strong>
+                <strong>{row.alias}</strong>
+                <span className={`status ${row.status}`}>
+                  <span className="status-dot" aria-hidden="true" />
+                  {STATUS_LABEL[row.status]}
+                </span>
               </span>
               <span className="fleet-sub">
-                <span className="mono">{server.hostMeta?.hostname ?? "—"}</span>
-                <span className="muted"> · {server.mode}</span>
+                <span className="mono">{row.hostMeta?.hostname ?? "—"}</span>
+                <span className="muted"> · {row.mode}</span>
               </span>
+              {row.error && <span className="fleet-error">{row.error}</span>}
             </span>
-            <span className={`status ${server.status}`}>
-              <span className="status-dot" aria-hidden="true" />
-              {STATUS_LABEL[server.status]}
+            <span className="fleet-stat" data-label="CPU 均值">
+              <strong className="stat-value">{formatPercent(row.cpuAvg)}</strong>
+              <span className="stat-note mono">max {formatPercent(row.cpuMax)}</span>
             </span>
-            <span className="fleet-stat" data-label="CPU">
-              <strong className="stat-value">{formatPercent(server.cpuPercent)}</strong>
-              <span className="meter" aria-hidden="true">
-                <span
-                  className="meter-fill"
-                  style={{ width: `${Math.max(0, Math.min(100, server.cpuPercent ?? 0))}%` }}
-                />
-              </span>
+            <span className="fleet-stat" data-label="CPU p95">
+              <strong className="stat-value">{formatPercent(row.cpuP95)}</strong>
             </span>
-            <span className="fleet-stat" data-label="内存">
-              <strong className="stat-value">{formatPercent(server.memUsedPercent)}</strong>
-              <span
-                className="stat-note mono"
-                title={`${formatBytes(server.memUsedBytes)} / ${formatBytes(server.memTotalBytes)}`}
-              >
-                {formatBytes(server.memUsedBytes)} / {formatBytes(server.memTotalBytes)}
-              </span>
+            <span className="fleet-stat" data-label="内存均值">
+              <strong className="stat-value">{formatPercent(row.memAvg)}</strong>
             </span>
-            <span className="fleet-stat" data-label="GPU">
-              <strong className="stat-value">{gpuLabel(server)}</strong>
-              <span className="stat-note mono" title={gpuNote(server)}>
-                {gpuNote(server)}
-              </span>
-            </span>
-            <span className="fleet-stat" data-label="核数">
-              <strong className="stat-value">{server.coreCount ?? "—"}</strong>
-              <span className="stat-note mono">p95 {formatPercent(server.perCoreP95Percent)}</span>
-            </span>
-            <span className="fleet-stat" data-label="运行时间">
+            <span className="fleet-stat" data-label="GPU 均值">
               <strong className="stat-value">
-                {server.hostMeta?.uptimeSecs === null ||
-                server.hostMeta?.uptimeSecs === undefined
-                  ? "—"
-                  : formatDuration(server.hostMeta.uptimeSecs * 1000)}
+                {row.gpuAvg === null ? "无" : formatPercent(row.gpuAvg)}
               </strong>
-            </span>
-            <span className="fleet-time" data-label="最后采样">
-              <strong className="stat-time">{relativeTime(server.lastSeenMs)}</strong>
-              <span className="stat-note mono" title={formatDateTime(server.lastSeenMs)}>
-                {formatDateTime(server.lastSeenMs)}
+              <span className="stat-note mono">
+                {row.gpus > 0 ? `${row.gpus} 张` : "无 GPU"}
               </span>
+            </span>
+            <span className="fleet-stat" data-label="覆盖">
+              <strong className={`stat-value ${row.coverage !== null && row.coverage < 80 ? "danger" : ""}`}>
+                {row.coverage === null ? "—" : `${row.coverage.toFixed(1)}%`}
+              </strong>
+              <span className="stat-note mono">
+                {row.gaps > 0 ? `${row.gaps} 段缺口` : "连续"}
+              </span>
+            </span>
+            <span className="fleet-stat" data-label="样本">
+              <strong className="stat-value">{row.samples.toLocaleString()}</strong>
+            </span>
+            <span className="fleet-time" data-label="最后数据">
+              <strong className="stat-time">{relativeTime(row.lastPointMs)}</strong>
+              <span className="stat-note mono">{formatDateTime(row.lastPointMs)}</span>
             </span>
             <span className="fleet-chevron" aria-hidden="true">
               <ArrowRight size={14} strokeWidth={1.6} />
@@ -263,16 +409,18 @@ export function FleetPanel({
         ))}
       </div>
 
+      {scanning && <p className="fleet-hint muted small">正在聚合所选范围…</p>}
+
       {copied === "manual" && (
         <div className="notice warn">
           <strong>当前为 http 内网地址，浏览器不允许自动写剪贴板</strong>
           <p>下面是可直接选中的 Markdown 摘要：</p>
-          <pre className="summary-text">{buildSummary(servers)}</pre>
+          <pre className="summary-text">{buildSummary(rows ?? [], from, to)}</pre>
         </div>
       )}
 
       <p className="fleet-hint muted small">
-        点击任意主机进入单机视图。汇总只读取最新的 metrics 与 host 记录，不写数据目录。
+        数字是所选时间范围的平均/峰值，不是当前瞬时值。点击任意主机进入单机视图。
       </p>
     </section>
   );

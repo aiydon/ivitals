@@ -371,12 +371,14 @@ async function run(req: SeriesRequest): Promise<SeriesWorkerResult> {
 
   // Reject buckets that somehow fall outside [from, to) (defensive).
   const filtered = points.filter((p) => p.t >= req.fromMs && p.t < req.toMs);
+  const effectiveEnd = Math.min(req.toMs, Date.now());
+  const expected = Math.max(0, Math.ceil((effectiveEnd - req.fromMs) / req.bucketMs));
   const coverageInfo = coverage(
     filtered.map((point) => point.t),
     req.fromMs,
-    req.toMs,
+    effectiveEnd,
     req.bucketMs,
-    bucketCount,
+    expected,
   );
   return {
     points: filtered,

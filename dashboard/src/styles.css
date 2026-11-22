@@ -1378,6 +1378,71 @@ tbody tr:hover {
 }
 
 
+/* ---------- breadcrumb + host tabs ---------- */
+
+.breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: auto;
+  margin-bottom: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.breadcrumb:hover:not(:disabled) {
+  background: transparent;
+  color: var(--fg);
+}
+
+.breadcrumb-sep {
+  opacity: 0.5;
+}
+
+.breadcrumb-current {
+  color: var(--fg);
+}
+
+.host-tabs {
+  display: flex;
+  gap: 2px;
+  margin: -6px 0 18px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.host-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+  margin-bottom: -1px;
+}
+
+.host-tab:hover:not(:disabled) {
+  background: transparent;
+  color: var(--fg);
+}
+
+.host-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
 /* ---------- fleet KPIs ---------- */
 
 .section-actions {
@@ -1601,7 +1666,35 @@ tbody tr:hover {
     flex-wrap: wrap;
   }
 
-  .side-block,
+  .side-block {
+    display: block;
+    margin-top: 10px;
+  }
+
+  .host-list {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .host-row {
+    width: auto;
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  .host-row .host-meta {
+    display: none;
+  }
+
+  .host-row.active {
+    border-color: var(--accent);
+    box-shadow: none;
+  }
+
   .side-footer {
     display: none;
   }

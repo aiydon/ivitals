@@ -220,12 +220,14 @@ async function run(req: CoresRequest): Promise<CoresWorkerResult> {
       "所选范围没有 per_core_percent 数据（旧 schema 或该主机未开启 cpu_detail）",
     );
   }
+  const effectiveEnd = Math.min(req.toMs, Date.now());
+  const expected = Math.max(0, Math.ceil((effectiveEnd - req.fromMs) / req.bucketMs));
   const coverageInfo = coverage(
     frames.map((frame) => frame.t),
     req.fromMs,
-    req.toMs,
+    effectiveEnd,
     req.bucketMs,
-    bucketCount,
+    expected,
   );
 
   return {

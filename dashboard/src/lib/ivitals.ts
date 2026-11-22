@@ -237,6 +237,59 @@ export async function tailJsonRecord(
   }
 }
 
+/**
+ * Reads backwards from the end of a JSONL file and returns the newest record
+ * whose `ts_ms` falls inside `[startMs, endMs)`.
+ *
+ * Needed because a local calendar day straddles two UTC partitions: the tail
+ * of the later file is usually *after* the local day ends, so the day's last
+ * snapshot sits earlier in that same file.
+ */
+export async function lastJsonRecordWithin(
+  path: string,
+  startMs: number,
+  endMs: number,
+  maxBytes = 16 * 1024 * 1024,
+): Promise<TailRecord | null> {
+  let st;
+  try {
+    st = await stat(path);
+  } catch {
+    return null;
+  }
+  if (!st.isFile() || st.size === 0) return null;
+
+  const start = Math.max(0, st.size - maxBytes);
+  const length = st.size - start;
+  const fh = await open(path, "r");
+  try {
+    const buf = Buffer.alloc(length);
+    const { bytesRead } = await fh.read(buf, 0, length, start);
+    const lines = buf.toString("utf8", 0, bytesRead).split("\n");
+    const first = start > 0 ? 1 : 0;
+    for (let i = lines.length - 1; i >= first; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const record = value as { ts_ms?: unknown };
+      const ts = typeof record.ts_ms === "number" ? record.ts_ms : null;
+      if (ts === null) continue;
+      if (ts >= startMs && ts < endMs) {
+        return { value, line, mtimeMs: st.mtimeMs, size: st.size };
+      }
+      if (ts < startMs) break;
+    }
+    return null;
+  } finally {
+    await fh.close();
+  }
+}
+
 export function dayStartMs(date: string): number {
   const [year, month, day] = date.split("-").map(Number);
   return Date.UTC(year, month - 1, day);

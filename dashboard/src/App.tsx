@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  Activity,
   Database,
+  Gauge,
   Grid3X3,
   LayoutDashboard,
   ListTree,
   Moon,
   RefreshCw,
-  ServerCog,
   ShieldCheck,
   Sun,
+  Timer,
 } from "lucide-react";
 
 import { api } from "./api";
@@ -22,26 +22,37 @@ import { formatBytes, formatDateTime, relativeTime } from "./format";
 import type { MetaResponse, OverviewResponse } from "./shared/types";
 import { useTheme } from "./theme";
 
-const VIEWS = ["fleet", "host", "telemetry", "cores", "processes"] as const;
-type View = (typeof VIEWS)[number];
+const HOST_TABS = ["overview", "telemetry", "cores", "processes"] as const;
+type HostTab = (typeof HOST_TABS)[number];
 
-const NAV: Array<{ id: View; label: string; icon: typeof LayoutDashboard }> = [
-  { id: "fleet", label: "总览", icon: LayoutDashboard },
-  { id: "host", label: "主机", icon: ServerCog },
-  { id: "telemetry", label: "时序", icon: Activity },
-  { id: "cores", label: "多核", icon: Grid3X3 },
-  { id: "processes", label: "进程", icon: ListTree },
-];
+const TAB_LABEL: Record<HostTab, string> = {
+  overview: "概览",
+  telemetry: "时序",
+  cores: "多核",
+  processes: "进程",
+};
 
 const AUTO_REFRESH_SECS = 60;
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+interface Route {
+  view: "fleet" | "host";
+  alias: string;
+  tab: HostTab;
 }
 
-function initialView(): View {
-  const hash = window.location.hash.replace("#", "");
-  return (VIEWS as readonly string[]).includes(hash) ? (hash as View) : "fleet";
+function isHostTab(value: string | undefined): value is HostTab {
+  return value !== undefined && (HOST_TABS as readonly string[]).includes(value);
+}
+
+function parseRoute(): Route {
+  const hash = decodeURIComponent(window.location.hash.replace("#", ""));
+  if (!hash || hash === "fleet") return { view: "fleet", alias: "", tab: "overview" };
+  const [alias, tab] = hash.split("/");
+  return { view: "host", alias, tab: isHostTab(tab) ? tab : "overview" };
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function StatusDot({ status }: { status: string }) {
@@ -56,8 +67,10 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [refreshTick, setRefreshTick] = useState(0);
-  const [view, setView] = useState<View>(initialView);
+  const [route, setRoute] = useState<Route>(parseRoute);
   const [selected, setSelected] = useState(() => {
+    const initial = parseRoute();
+    if (initial.alias) return initial.alias;
     try {
       return localStorage.getItem("ivitals-host") ?? "";
     } catch {
@@ -135,9 +148,23 @@ export function App() {
   }, [selected]);
 
   useEffect(() => {
-    window.history.replaceState(null, "", `#${view}`);
+    const hash =
+      route.view === "fleet" ? "#fleet" : `#${route.alias}/${route.tab}`;
+    window.history.replaceState(null, "", hash);
     window.scrollTo({ top: 0, behavior: "smooth" });
-  }, [view]);
+  }, [route]);
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(parseRoute());
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  const openFleet = () => setRoute({ view: "fleet", alias: selected, tab: "overview" });
+  const openHost = (alias: string, tab: HostTab = "overview") => {
+    setSelected(alias);
+    setRoute({ view: "host", alias, tab });
+  };
 
   if (!meta && metaError) {
     return (
@@ -170,32 +197,33 @@ export function App() {
   const selectedServer = overview?.servers.find((server) => server.alias === selected) ?? null;
   const hostMeta = selectedServer?.hostMeta ?? null;
   const generated = overview?.generatedAt ?? meta.generatedAt;
+  const isFleet = route.view === "fleet";
 
-  const title = view === "fleet" ? "集群总览" : (selectedServer?.alias ?? "主机");
-  const lede =
-    view === "fleet"
-      ? `${hostRows.length} 台主机 · 只读汇总 · 自动刷新 ${AUTO_REFRESH_SECS}s`
-      : selectedServer
-        ? [
-            hostMeta?.hostname,
-            selectedServer.coreCount ? `${selectedServer.coreCount} 核` : null,
-            hostMeta?.memTotalBytes ? formatBytes(hostMeta.memTotalBytes) : null,
-            selectedServer.mode,
-            `自动刷新 ${AUTO_REFRESH_SECS}s`,
-          ]
-            .filter(Boolean)
-            .join(" · ")
-        : "读取主机状态";
-
-  const pickHost = (alias: string) => {
-    setSelected(alias);
-    if (view === "fleet") setView("host");
-  };
+  const title = isFleet ? "集群总览" : (selectedServer?.alias ?? "主机");
+  const lede = isFleet
+    ? `${hostRows.length} 台主机 · 历史聚合 · 统计范围随选择更新`
+    : selectedServer
+      ? [
+          hostMeta?.hostname,
+          selectedServer.coreCount ? `${selectedServer.coreCount} 核` : null,
+          hostMeta?.memTotalBytes ? formatBytes(hostMeta.memTotalBytes) : null,
+          selectedServer.mode,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : "读取主机状态";
 
   return (
     <div className="shell">
       <aside className="sidebar">
-        <a className="brand" href="#fleet" onClick={() => setView("fleet")}>
+        <a
+          className="brand"
+          href="#fleet"
+          onClick={(event) => {
+            event.preventDefault();
+            openFleet();
+          }}
+        >
           <span className="brand-mark" aria-hidden="true">
             <span /><span /><span />
           </span>
@@ -205,31 +233,28 @@ export function App() {
           </span>
         </a>
 
-        <nav className="side-nav" aria-label="Sections">
-          {NAV.map(({ id, label, icon: Icon }) => (
-            <button
-              type="button"
-              key={id}
-              className={`nav-item ${view === id ? "active" : ""}`}
-              onClick={() => setView(id)}
-              aria-current={view === id ? "page" : undefined}
-            >
-              <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
-              <span>{label}</span>
-            </button>
-          ))}
+        <nav className="side-nav" aria-label="Global">
+          <button
+            type="button"
+            className={`nav-item ${isFleet ? "active" : ""}`}
+            onClick={openFleet}
+            aria-current={isFleet ? "page" : undefined}
+          >
+            <LayoutDashboard size={16} strokeWidth={1.5} aria-hidden="true" />
+            <span>总览</span>
+          </button>
         </nav>
 
         <div className="side-block">
-          <div className="side-label">主机</div>
+          <div className="side-label">选择主机</div>
           <div className="host-list">
             {hostRows.map((host) => (
               <button
                 type="button"
-                className={`host-row ${host.alias === selected ? "active" : ""}`}
+                className={`host-row ${!isFleet && host.alias === selected ? "active" : ""}`}
                 key={host.alias}
-                onClick={() => pickHost(host.alias)}
-                aria-pressed={host.alias === selected}
+                onClick={() => openHost(host.alias, route.tab)}
+                aria-current={!isFleet && host.alias === selected ? "true" : undefined}
                 aria-label={`选择主机 ${host.alias}`}
               >
                 <span className="host-id">
@@ -253,13 +278,21 @@ export function App() {
             <Database size={13} strokeWidth={1.5} aria-hidden="true" />
             <span>…/{meta.dataDir.split("/").slice(-2).join("/")}</span>
           </div>
-          <div className="mono tiny">{meta.dates.length} 个日期目录</div>
+          <div className="mono tiny">{meta.dates.length} 个本地日期</div>
         </div>
       </aside>
 
       <main className="main">
         <header className="page-header">
           <div>
+            {!isFleet && (
+              <button type="button" className="breadcrumb" onClick={openFleet}>
+                <LayoutDashboard size={13} strokeWidth={1.6} aria-hidden="true" />
+                总览
+                <span className="breadcrumb-sep" aria-hidden="true">/</span>
+                <span className="breadcrumb-current">{selectedServer?.alias ?? "主机"}</span>
+              </button>
+            )}
             <h1>{title}</h1>
             <p className="lede">{lede}</p>
           </div>
@@ -287,7 +320,35 @@ export function App() {
           </div>
         </header>
 
-        {meta.warnings.length > 0 && view !== "fleet" && (
+        {!isFleet && (
+          <div className="host-tabs" role="tablist" aria-label="主机视图">
+            {HOST_TABS.map((tab) => {
+              const Icon =
+                tab === "overview"
+                  ? Gauge
+                  : tab === "telemetry"
+                    ? Timer
+                    : tab === "cores"
+                      ? Grid3X3
+                      : ListTree;
+              return (
+                <button
+                  type="button"
+                  role="tab"
+                  key={tab}
+                  className={`host-tab ${route.tab === tab ? "active" : ""}`}
+                  aria-selected={route.tab === tab}
+                  onClick={() => openHost(selected, tab)}
+                >
+                  <Icon size={14} strokeWidth={1.5} aria-hidden="true" />
+                  {TAB_LABEL[tab]}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {meta.warnings.length > 0 && !isFleet && (
           <div className="notice warn">
             <strong>配置提示</strong>
             <ul>
@@ -300,35 +361,35 @@ export function App() {
 
         {overviewError && (
           <div className="notice error">
-            <strong>总览读取失败</strong>
+            <strong>主机数据读取失败</strong>
             <p>{overviewError}</p>
           </div>
         )}
 
-        {view === "fleet" && (
+        {isFleet && (
           <FleetPanel
             overview={overview}
             meta={meta}
             loading={!overview && !overviewError}
-            onSelect={pickHost}
+            reloadToken={nonce}
+            onSelect={(alias) => openHost(alias, "overview")}
           />
         )}
 
-        {view === "host" && (
+        {!isFleet && route.tab === "overview" && (
           <OverviewPanel
             server={selectedServer}
             loading={!overview && !overviewError}
             error={null}
           />
         )}
-
-        {view === "telemetry" && (
+        {!isFleet && route.tab === "telemetry" && (
           <SeriesPanel meta={meta} server={selected} refreshTick={refreshTick} />
         )}
-        {view === "cores" && (
+        {!isFleet && route.tab === "cores" && (
           <CorePanel meta={meta} server={selected} refreshTick={refreshTick} />
         )}
-        {view === "processes" && (
+        {!isFleet && route.tab === "processes" && (
           <ProcessPanel meta={meta} server={selected} refreshTick={refreshTick} />
         )}
 

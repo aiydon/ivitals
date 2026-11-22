@@ -560,7 +560,7 @@ export function SeriesPanel({
           {data.missingDates.length > 0 && (
             <span className="warn-text">缺失 {data.missingDates.length} 天</span>
           )}
-          <span className="muted">时间轴为本地时区，日期分区为 UTC</span>
+          <span className="muted">日期与时间轴均为本地时区</span>
         </div>
       )}
 
