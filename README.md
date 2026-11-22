@@ -262,10 +262,12 @@ duckdb -c "SELECT ts_ms, server, d.device, d.util_percent, d.await_ms
 to the data directory and reads JSONL incrementally (tail reads for the
 overview/process snapshot; Workers + streaming line readers for GPU/time
 series and per-core heatmaps). The UI is a graphite instrument panel with a
-fleet overview for reporting, a host switcher, per-host detail views (no
-cross-host numeric comparison), dark/light themes, 60 s auto-refresh, one-click
-date presets, per-GPU detail, per-core occupancy heatmaps, filesystem capacity,
-GPU processes and explicit data-gap warnings. Visual direction follows
+fleet overview that aggregates a chosen **local** date range for reporting, a
+host scope with its own tabs (no cross-host numeric comparison), dark/light
+themes, 60 s auto-refresh, one-click date presets, per-GPU detail, per-core
+occupancy heatmaps, filesystem capacity, GPU processes and explicit data-gap
+warnings. Date pickers and chart axes use the browser's local timezone while
+the on-disk partitions stay UTC. Visual direction follows
 [unslop](https://github.com/heydamir/unslop) by Damir Sokolovsky (CC BY 4.0).
 
 ```bash
