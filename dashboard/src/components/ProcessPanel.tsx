@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 
 import { api } from "../api";
+import { DayPicker } from "./DateRangeBar";
 import { formatBytes, formatDateTime, formatDuration, formatPercent, relativeTime } from "../format";
 import type { MetaResponse, ProcessesResponse } from "../shared/types";
 
@@ -77,19 +78,14 @@ export function ProcessPanel({
         <span className="section-meta mono">{server} · top {top}</span>
       </div>
 
-      <div className="controls">
-        <label>
-          日期 (UTC)
-          <input
-            aria-label="进程日期"
-            type="date"
-            value={date}
-            min={meta.dates[meta.dates.length - 1]}
-            max={meta.dates[0]}
-            onChange={(event) => setDate(event.target.value)}
-          />
-        </label>
-        <label>
+      <div className="control-row">
+        <DayPicker
+          dates={meta.dates}
+          value={date}
+          onChange={setDate}
+          ariaLabel="进程快照日期"
+        />
+        <label className="inline-field">
           Top N
           <select aria-label="Top N" value={top} onChange={(event) => setTop(event.target.value)}>
             {TOP_CHOICES.map((value) => (
@@ -100,7 +96,7 @@ export function ProcessPanel({
           </select>
         </label>
         <button onClick={() => setNonce((value) => value + 1)} disabled={loading}>
-          {loading ? "读取中…" : "重新读取"}
+          {loading ? "读取中…" : "刷新快照"}
         </button>
       </div>
 

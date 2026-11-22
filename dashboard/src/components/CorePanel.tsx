@@ -9,6 +9,7 @@ import * as echarts from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { api } from "../api";
+import { DateRangeBar } from "./DateRangeBar";
 import { formatDuration, formatTime } from "../format";
 import { chartTheme, useTheme } from "../theme";
 import type { CoresResponse, MetaResponse } from "../shared/types";
@@ -44,7 +45,7 @@ function heatmapOption(data: CoresResponse, theme: "dark" | "light"): Record<str
     animation: false,
     backgroundColor: "transparent",
     textStyle: { color: fg, fontFamily: "IBM Plex Sans" },
-    grid: { left: 58, right: 18, top: 56, bottom: 42 },
+    grid: { left: 58, right: 18, top: 46, bottom: 42 },
     tooltip: {
       position: "top",
       backgroundColor: tooltipBg,
@@ -56,18 +57,22 @@ function heatmapOption(data: CoresResponse, theme: "dark" | "light"): Record<str
       },
     },
     visualMap: {
-      min: 0,
-      max: 100,
-      calculable: true,
+      type: "piecewise",
       orient: "horizontal",
       left: "center",
-      top: 8,
-      itemWidth: 12,
-      itemHeight: 90,
+      top: 4,
+      itemWidth: 14,
+      itemHeight: 12,
+      itemGap: 12,
       textStyle: { color: muted, fontSize: 10 },
-      inRange: {
-        color: c.heatmap,
-      },
+      pieces: [
+        { min: 0, max: 5, label: "0–5", color: c.heatmap[0] },
+        { min: 5, max: 15, label: "5–15", color: c.heatmap[1] },
+        { min: 15, max: 35, label: "15–35", color: c.heatmap[2] },
+        { min: 35, max: 60, label: "35–60", color: c.heatmap[3] },
+        { min: 60, max: 85, label: "60–85", color: c.heatmap[4] },
+        { min: 85, max: 100, label: "85–100", color: c.heatmap[5] },
+      ],
     },
     xAxis: {
       type: "category",
@@ -89,7 +94,7 @@ function heatmapOption(data: CoresResponse, theme: "dark" | "light"): Record<str
         type: "heatmap",
         data: points,
         itemStyle: {
-          borderColor: theme === "light" ? "rgba(21,23,26,0.12)" : "rgba(11,12,14,0.72)",
+          borderColor: theme === "light" ? "rgba(21,23,26,0.10)" : "rgba(11,12,14,0.42)",
           borderWidth: 0.5,
         },
         progressive: 4000,
@@ -190,8 +195,6 @@ export function CorePanel({
     return () => controller.abort();
   }, [server, from, to, maxFrames, nonce, refreshTick]);
 
-  const minDate = meta.dates[meta.dates.length - 1];
-  const maxDate = meta.dates[0];
   const gaps = data ? internalGaps(data) : [];
 
   return (
@@ -204,38 +207,19 @@ export function CorePanel({
         <span className="section-meta mono">{server} · per-core heatmap</span>
       </div>
 
-      <div className="controls">
-        <label>
-          开始日期 (UTC)
-          <input
-            aria-label="多核开始日期"
-            type="date"
-            value={from}
-            min={minDate}
-            max={maxDate}
-            onChange={(event) => {
-              const value = event.target.value;
-              setFrom(value);
-              if (value > to) setTo(value);
-            }}
-          />
-        </label>
-        <label>
-          结束日期 (UTC)
-          <input
-            aria-label="多核结束日期"
-            type="date"
-            value={to}
-            min={minDate}
-            max={maxDate}
-            onChange={(event) => {
-              const value = event.target.value;
-              if (value < from) setFrom(value);
-              setTo(value);
-            }}
-          />
-        </label>
-        <label>
+      <DateRangeBar
+        dates={meta.dates}
+        from={from}
+        to={to}
+        ariaPrefix="多核"
+        onChange={(nextFrom, nextTo) => {
+          setFrom(nextFrom);
+          setTo(nextTo);
+        }}
+      />
+
+      <div className="control-row">
+        <label className="inline-field">
           帧数上限
           <select
             aria-label="多核帧数上限"

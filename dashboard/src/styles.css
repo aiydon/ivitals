@@ -188,13 +188,34 @@ p {
 .nav-item {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 10px;
+  width: 100%;
   height: 34px;
   padding: 0 10px;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
   color: var(--secondary);
   font-size: 13px;
+  font-weight: 400;
+  text-align: left;
   transition: background-color 140ms var(--ease), color 140ms var(--ease);
+}
+
+.nav-item.active {
+  background: var(--raised);
+  color: var(--fg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.nav-item.active svg {
+  color: var(--accent);
+}
+
+.nav-item:hover:not(:disabled) {
+  background: var(--raised);
+  color: var(--fg);
 }
 
 .nav-item svg {
@@ -320,8 +341,6 @@ p {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
 }
 
 .main {
@@ -642,8 +661,10 @@ a:focus-visible {
 .fleet-head,
 .fleet-row {
   display: grid;
-  grid-template-columns: minmax(200px, 2.2fr) repeat(4, minmax(104px, 1fr)) minmax(104px, 0.95fr);
-  gap: 16px;
+  grid-template-columns:
+    minmax(180px, 1.8fr) 82px minmax(88px, 0.8fr) minmax(124px, 1.1fr)
+    minmax(120px, 1fr) 64px 84px minmax(112px, 0.9fr) 22px;
+  gap: 14px;
   align-items: center;
 }
 
@@ -662,6 +683,44 @@ a:focus-visible {
 
 .fleet-row:hover {
   background: var(--hover);
+}
+
+.fleet-row-button {
+  width: 100%;
+  height: auto;
+  min-height: 72px;
+  padding: 12px 10px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fleet-row-button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.fleet-row-button:active:not(:disabled) {
+  transform: none;
+}
+
+.fleet-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 140ms var(--ease), transform 140ms var(--ease);
+}
+
+.fleet-row-button:hover .fleet-chevron,
+.fleet-row-button:focus-visible .fleet-chevron {
+  opacity: 1;
+  transform: translateX(2px);
 }
 
 .fleet-host {
@@ -804,8 +863,32 @@ a:focus-visible {
   transition: width 300ms var(--ease);
 }
 
-.fleet-stat:nth-child(3) .meter-fill {
+.fleet-row > .fleet-stat:nth-child(3) .meter-fill {
+  background: var(--series-cpu);
+}
+
+.fleet-row > .fleet-stat:nth-child(4) .meter-fill {
   background: var(--series-mem);
+}
+
+.fleet-hint {
+  margin-top: 10px;
+}
+
+.summary-text {
+  max-height: 220px;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--secondary);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre;
+  user-select: all;
 }
 
 /* ---------- detail grid ---------- */
@@ -1294,6 +1377,172 @@ tbody tr:hover {
   white-space: nowrap;
 }
 
+
+/* ---------- fleet KPIs ---------- */
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--raised);
+}
+
+.kpi-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.kpi-value {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.inline-link {
+  display: inline;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: inherit;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.inline-link:hover:not(:disabled) {
+  background: transparent;
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+/* ---------- date scope ---------- */
+
+.date-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 2px 0 12px;
+}
+
+.date-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--secondary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.chip-button:hover:not(:disabled) {
+  background: var(--raised);
+  color: var(--fg);
+}
+
+.chip-button.active {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+
+.chip-button.active:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-ink);
+  opacity: 0.9;
+}
+
+.chip-button svg.flip {
+  transform: rotate(180deg);
+}
+
+.date-summary {
+  color: var(--secondary);
+  font-size: 11px;
+}
+
+.date-custom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--raised);
+}
+
+.date-custom label,
+.day-picker,
+.inline-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 12px;
+  margin-bottom: 14px;
+}
+
+.control-row > button {
+  margin-left: auto;
+}
+
+.day-picker select {
+  min-width: 150px;
+}
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 1180px) {
@@ -1315,12 +1564,18 @@ tbody tr:hover {
 
   .fleet-head,
   .fleet-row {
-    grid-template-columns: minmax(180px, 1.8fr) repeat(3, minmax(92px, 1fr)) minmax(92px, 0.9fr);
+    grid-template-columns:
+      minmax(150px, 1.6fr) 74px minmax(78px, 0.8fr) minmax(104px, 1fr)
+      minmax(104px, 1fr) 56px minmax(100px, 0.9fr) 18px;
   }
 
-  .fleet-head span:nth-child(5),
-  .fleet-row .fleet-stat:nth-child(5) {
+  .fleet-head span:nth-child(7),
+  .fleet-row > .fleet-stat:nth-child(7) {
     display: none;
+  }
+
+  .kpi-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -1388,13 +1643,38 @@ tbody tr:hover {
     padding: 16px 10px;
   }
 
+  .fleet-row-button {
+    min-height: 0;
+  }
+
+  .fleet-row > .fleet-stat::before,
+  .fleet-row > .fleet-time::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 400;
+  }
+
   .fleet-host,
   .fleet-time {
     grid-column: 1 / -1;
   }
 
-  .fleet-row .fleet-stat:nth-child(5) {
+  .fleet-row > .fleet-stat:nth-child(7) {
     display: flex;
+  }
+
+  .fleet-chevron {
+    display: none;
+  }
+
+  .kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .control-row > button {
+    margin-left: 0;
   }
 
   .accelerator-row {

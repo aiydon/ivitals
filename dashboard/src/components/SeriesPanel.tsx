@@ -10,6 +10,7 @@ import * as echarts from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { api } from "../api";
+import { DateRangeBar } from "./DateRangeBar";
 import { formatDateTime, formatDuration, formatPercent } from "../format";
 import { chartTheme, useTheme } from "../theme";
 import type { MetaResponse, SeriesResponse } from "../shared/types";
@@ -149,8 +150,15 @@ function chartOption(data: SeriesResponse, theme: "dark" | "light"): Record<stri
     animation: false,
     backgroundColor: "transparent",
     textStyle: { color: fg, fontFamily: "IBM Plex Sans" },
-    grid: { left: 56, right: 58, top: 44, bottom: 68 },
-    legend: { top: 4, textStyle: { color: muted, fontFamily: "IBM Plex Sans" }, icon: "roundRect", itemWidth: 14 },
+    grid: { left: 56, right: 58, top: 36, bottom: 68 },
+    legend: {
+      type: "scroll",
+      top: 0,
+      textStyle: { color: muted, fontFamily: "IBM Plex Sans" },
+      icon: "roundRect",
+      itemWidth: 14,
+      pageTextStyle: { color: muted },
+    },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "cross", label: { backgroundColor: border } },
@@ -185,7 +193,6 @@ function chartOption(data: SeriesResponse, theme: "dark" | "light"): Record<stri
     yAxis: [
       {
         type: "value",
-        name: "CPU/内存 %",
         min: 0,
         max: axisMax,
         axisLabel: { color: muted, formatter: "{value}%", fontFamily: "IBM Plex Mono" },
@@ -193,7 +200,6 @@ function chartOption(data: SeriesResponse, theme: "dark" | "light"): Record<stri
       },
       {
         type: "value",
-        name: "GPU %",
         min: 0,
         max: 100,
         axisLabel: { color: muted, formatter: "{value}%", fontFamily: "IBM Plex Mono" },
@@ -231,8 +237,15 @@ function gpuChartOption(data: SeriesResponse, theme: "dark" | "light"): Record<s
     animation: false,
     backgroundColor: "transparent",
     textStyle: { color: fg, fontFamily: "IBM Plex Sans" },
-    grid: { left: 52, right: 56, top: 40, bottom: 36 },
-    legend: { top: 4, textStyle: { color: muted, fontFamily: "IBM Plex Sans" }, icon: "roundRect", itemWidth: 14 },
+    grid: { left: 52, right: 56, top: 32, bottom: 36 },
+    legend: {
+      type: "scroll",
+      top: 0,
+      textStyle: { color: muted, fontFamily: "IBM Plex Sans" },
+      icon: "roundRect",
+      itemWidth: 14,
+      pageTextStyle: { color: muted },
+    },
     tooltip: {
       trigger: "axis",
       backgroundColor: c.tooltipBg,
@@ -258,7 +271,6 @@ function gpuChartOption(data: SeriesResponse, theme: "dark" | "light"): Record<s
     yAxis: [
       {
         type: "value",
-        name: "°C",
         min: 0,
         max: 100,
         axisLabel: { color: muted, fontFamily: "IBM Plex Mono" },
@@ -266,7 +278,6 @@ function gpuChartOption(data: SeriesResponse, theme: "dark" | "light"): Record<s
       },
       {
         type: "value",
-        name: "W",
         min: 0,
         max: powerMax,
         axisLabel: { color: muted, fontFamily: "IBM Plex Mono" },
@@ -479,16 +490,6 @@ export function SeriesPanel({
     return () => controller.abort();
   }, [server, from, to, maxPoints, nonce, refreshTick]);
 
-  const setPreset = (days: number) => {
-    const latest = meta.dates[0];
-    if (!latest) return;
-    const span = Math.min(meta.dates.length, days, 31);
-    setTo(latest);
-    setFrom(meta.dates[span - 1] ?? latest);
-  };
-
-  const minDate = meta.dates[meta.dates.length - 1];
-  const maxDate = meta.dates[0];
   const gaps = data ? internalGaps(data) : [];
 
   return (
@@ -501,38 +502,19 @@ export function SeriesPanel({
         <span className="section-meta mono">{server} · CPU · 内存 · GPU</span>
       </div>
 
-      <div className="controls">
-        <label>
-          开始日期 (UTC)
-          <input
-            aria-label="开始日期"
-            type="date"
-            value={from}
-            min={minDate}
-            max={maxDate}
-            onChange={(event) => {
-              const value = event.target.value;
-              setFrom(value);
-              if (value > to) setTo(value);
-            }}
-          />
-        </label>
-        <label>
-          结束日期 (UTC)
-          <input
-            aria-label="结束日期"
-            type="date"
-            value={to}
-            min={minDate}
-            max={maxDate}
-            onChange={(event) => {
-              const value = event.target.value;
-              setTo(value);
-              if (value < from) setFrom(value);
-            }}
-          />
-        </label>
-        <label>
+      <DateRangeBar
+        dates={meta.dates}
+        from={from}
+        to={to}
+        ariaPrefix="时序"
+        onChange={(nextFrom, nextTo) => {
+          setFrom(nextFrom);
+          setTo(nextTo);
+        }}
+      />
+
+      <div className="control-row">
+        <label className="inline-field">
           点数上限
           <select
             aria-label="点数上限"
@@ -546,20 +528,9 @@ export function SeriesPanel({
             ))}
           </select>
         </label>
-        <div className="preset-group">
-          <button className="ghost" onClick={() => setPreset(1)}>
-            最新一天
-          </button>
-          <button className="ghost" onClick={() => setPreset(2)}>
-            最近 2 天
-          </button>
-          <button className="ghost" onClick={() => setPreset(31)}>
-            全部
-          </button>
-          <button onClick={() => setNonce((value) => value + 1)} disabled={loading}>
-            {loading ? "扫描中…" : "重新扫描"}
-          </button>
-        </div>
+        <button onClick={() => setNonce((value) => value + 1)} disabled={loading}>
+          {loading ? "扫描中…" : "重新扫描"}
+        </button>
       </div>
 
       {error && (

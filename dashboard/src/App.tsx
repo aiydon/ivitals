@@ -7,30 +7,41 @@ import {
   ListTree,
   Moon,
   RefreshCw,
+  ServerCog,
   ShieldCheck,
   Sun,
 } from "lucide-react";
 
 import { api } from "./api";
 import { CorePanel } from "./components/CorePanel";
+import { FleetPanel } from "./components/Fleet";
 import { OverviewPanel } from "./components/Overview";
 import { ProcessPanel } from "./components/ProcessPanel";
 import { SeriesPanel } from "./components/SeriesPanel";
-import { formatBytes, formatDateTime, formatTime } from "./format";
+import { formatBytes, formatDateTime, relativeTime } from "./format";
 import type { MetaResponse, OverviewResponse } from "./shared/types";
 import { useTheme } from "./theme";
 
-const NAV = [
-  { id: "overview", label: "主机", icon: LayoutDashboard },
+const VIEWS = ["fleet", "host", "telemetry", "cores", "processes"] as const;
+type View = (typeof VIEWS)[number];
+
+const NAV: Array<{ id: View; label: string; icon: typeof LayoutDashboard }> = [
+  { id: "fleet", label: "总览", icon: LayoutDashboard },
+  { id: "host", label: "主机", icon: ServerCog },
   { id: "telemetry", label: "时序", icon: Activity },
   { id: "cores", label: "多核", icon: Grid3X3 },
   { id: "processes", label: "进程", icon: ListTree },
-] as const;
+];
 
 const AUTO_REFRESH_SECS = 60;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function initialView(): View {
+  const hash = window.location.hash.replace("#", "");
+  return (VIEWS as readonly string[]).includes(hash) ? (hash as View) : "fleet";
 }
 
 function StatusDot({ status }: { status: string }) {
@@ -45,6 +56,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [view, setView] = useState<View>(initialView);
   const [selected, setSelected] = useState(() => {
     try {
       return localStorage.getItem("ivitals-host") ?? "";
@@ -122,6 +134,11 @@ export function App() {
     }
   }, [selected]);
 
+  useEffect(() => {
+    window.history.replaceState(null, "", `#${view}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [view]);
+
   if (!meta && metaError) {
     return (
       <main className="app-loading">
@@ -149,26 +166,36 @@ export function App() {
       status: "no-data",
       hostMeta: null,
     }));
+
   const selectedServer = overview?.servers.find((server) => server.alias === selected) ?? null;
   const hostMeta = selectedServer?.hostMeta ?? null;
   const generated = overview?.generatedAt ?? meta.generatedAt;
-  const title = selectedServer?.alias ?? "集群遥测";
-  const lede = selectedServer
-    ? [
-        hostMeta?.hostname,
-        selectedServer.coreCount ? `${selectedServer.coreCount} 核` : null,
-        hostMeta?.memTotalBytes ? formatBytes(hostMeta.memTotalBytes) : null,
-        selectedServer.mode,
-        `自动刷新 ${AUTO_REFRESH_SECS}s`,
-      ]
-        .filter(Boolean)
-        .join(" · ")
-    : `${hostRows.length} 台主机`;
+
+  const title = view === "fleet" ? "集群总览" : (selectedServer?.alias ?? "主机");
+  const lede =
+    view === "fleet"
+      ? `${hostRows.length} 台主机 · 只读汇总 · 自动刷新 ${AUTO_REFRESH_SECS}s`
+      : selectedServer
+        ? [
+            hostMeta?.hostname,
+            selectedServer.coreCount ? `${selectedServer.coreCount} 核` : null,
+            hostMeta?.memTotalBytes ? formatBytes(hostMeta.memTotalBytes) : null,
+            selectedServer.mode,
+            `自动刷新 ${AUTO_REFRESH_SECS}s`,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : "读取主机状态";
+
+  const pickHost = (alias: string) => {
+    setSelected(alias);
+    if (view === "fleet") setView("host");
+  };
 
   return (
     <div className="shell">
       <aside className="sidebar">
-        <a className="brand" href="#overview">
+        <a className="brand" href="#fleet" onClick={() => setView("fleet")}>
           <span className="brand-mark" aria-hidden="true">
             <span /><span /><span />
           </span>
@@ -180,10 +207,16 @@ export function App() {
 
         <nav className="side-nav" aria-label="Sections">
           {NAV.map(({ id, label, icon: Icon }) => (
-            <a key={id} href={`#${id}`} className="nav-item">
+            <button
+              type="button"
+              key={id}
+              className={`nav-item ${view === id ? "active" : ""}`}
+              onClick={() => setView(id)}
+              aria-current={view === id ? "page" : undefined}
+            >
               <Icon size={16} strokeWidth={1.5} aria-hidden="true" />
               <span>{label}</span>
-            </a>
+            </button>
           ))}
         </nav>
 
@@ -195,7 +228,7 @@ export function App() {
                 type="button"
                 className={`host-row ${host.alias === selected ? "active" : ""}`}
                 key={host.alias}
-                onClick={() => setSelected(host.alias)}
+                onClick={() => pickHost(host.alias)}
                 aria-pressed={host.alias === selected}
                 aria-label={`选择主机 ${host.alias}`}
               >
@@ -218,7 +251,7 @@ export function App() {
           </div>
           <div className="side-path mono" title={meta.dataDir}>
             <Database size={13} strokeWidth={1.5} aria-hidden="true" />
-            <span>{meta.dataDir}</span>
+            <span>…/{meta.dataDir.split("/").slice(-2).join("/")}</span>
           </div>
           <div className="mono tiny">{meta.dates.length} 个日期目录</div>
         </div>
@@ -231,8 +264,8 @@ export function App() {
             <p className="lede">{lede}</p>
           </div>
           <div className="header-actions">
-            <div className="mono updated">
-              <span>更新于 {formatTime(generated)}</span>
+            <div className="mono updated" title={formatDateTime(generated)}>
+              <span>更新于 {relativeTime(generated)}</span>
               <span className="muted">{formatDateTime(generated)}</span>
             </div>
             <button
@@ -254,7 +287,7 @@ export function App() {
           </div>
         </header>
 
-        {meta.warnings.length > 0 && (
+        {meta.warnings.length > 0 && view !== "fleet" && (
           <div className="notice warn">
             <strong>配置提示</strong>
             <ul>
@@ -272,22 +305,32 @@ export function App() {
           </div>
         )}
 
-        <div id="overview" className="section">
+        {view === "fleet" && (
+          <FleetPanel
+            overview={overview}
+            meta={meta}
+            loading={!overview && !overviewError}
+            onSelect={pickHost}
+          />
+        )}
+
+        {view === "host" && (
           <OverviewPanel
             server={selectedServer}
             loading={!overview && !overviewError}
             error={null}
           />
-        </div>
-        <div id="telemetry" className="section">
+        )}
+
+        {view === "telemetry" && (
           <SeriesPanel meta={meta} server={selected} refreshTick={refreshTick} />
-        </div>
-        <div id="cores" className="section">
+        )}
+        {view === "cores" && (
           <CorePanel meta={meta} server={selected} refreshTick={refreshTick} />
-        </div>
-        <div id="processes" className="section">
+        )}
+        {view === "processes" && (
           <ProcessPanel meta={meta} server={selected} refreshTick={refreshTick} />
-        </div>
+        )}
 
         <footer className="page-footer">
           <span>ivitals · 数据目录只读</span>

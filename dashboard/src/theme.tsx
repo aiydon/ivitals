@@ -33,7 +33,7 @@ const DARK: ChartTheme = {
   gpuMem: "#96a9c6",
   temp: "#e0836f",
   power: "#d9a45b",
-  heatmap: ["#243b5a", "#2f6f8f", "#3fa7a0", "#8fbf7f", "#e0b268", "#e56767"],
+  heatmap: ["#35678a", "#3f8ba0", "#4fb09a", "#8bc46f", "#e0b268", "#e56767"],
 };
 
 const LIGHT: ChartTheme = {
@@ -50,7 +50,7 @@ const LIGHT: ChartTheme = {
   gpuMem: "#607b9e",
   temp: "#c2553f",
   power: "#a86f22",
-  heatmap: ["#dbe7f3", "#9cc4dd", "#54a6a0", "#a8c47a", "#e9c46a", "#e76f51"],
+  heatmap: ["#b9d4e8", "#86bad7", "#4ea59f", "#86bd68", "#e0bb56", "#d96b4a"],
 };
 
 export function chartTheme(theme: Theme): ChartTheme {
