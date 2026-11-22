@@ -5,6 +5,7 @@
  * never writes anywhere except the dashboard's own build output (done by
  * `bun build`, not at runtime).
  */
+import { networkInterfaces } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { Worker } from "node:worker_threads";
 
@@ -43,7 +44,7 @@ import type {
 } from "./shared/types";
 
 const PORT = Number(process.env.PORT ?? 8899);
-const HOST = process.env.HOST ?? "127.0.0.1";
+const HOST = process.env.HOST ?? "0.0.0.0";
 const PROD = process.env.NODE_ENV === "production";
 const DIST = resolve(import.meta.dir, "../dist");
 const DAY_MS = 86_400_000;
@@ -820,8 +821,19 @@ const server = Bun.serve({
 });
 
 console.log(
-  `ivitals dashboard (${PROD ? "production" : "dev"}) on http://${server.hostname}:${server.port}`,
+  `ivitals dashboard (${PROD ? "production" : "dev"}) listening on ${server.hostname}:${server.port}`,
 );
+if (server.hostname === "0.0.0.0" || server.hostname === "::") {
+  console.log(`  local:   http://127.0.0.1:${server.port}`);
+  for (const [name, addrs] of Object.entries(networkInterfaces())) {
+    for (const addr of addrs ?? []) {
+      if (addr.family === "IPv4" && !addr.internal) {
+        console.log(`  ${name}: http://${addr.address}:${server.port}`);
+      }
+    }
+  }
+  console.log("  note:    no authentication; expose only on a trusted network");
+}
 console.log(`  project: ${PROJECT_ROOT}`);
 console.log(`  config:  ${CONFIG_PATH}`);
 console.log(`  data:    ${DATA_DIR} (read-only)`);
