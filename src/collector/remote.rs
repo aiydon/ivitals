@@ -177,6 +177,9 @@ pub struct RemoteCollector {
     extras: ExtrasCollector,
     /// Script flags for the enabled extras families, built once.
     extras_args: String,
+    /// Reused SSH session. Handshakes dominate ticks on slow hosts, so keep
+    /// one connection per host and reconnect only when a command fails.
+    session: Option<Session>,
 }
 
 impl RemoteCollector {
@@ -205,6 +208,7 @@ impl RemoteCollector {
             top_n,
             extras: ExtrasCollector::new(extras_flags),
             extras_args: build_extras_args(&extras_flags),
+            session: None,
         }
     }
 
@@ -255,11 +259,37 @@ impl RemoteCollector {
     /// `with_extras` appends the enabled extras flags (metrics runs only —
     /// process runs re-collecting them would double the remote cost).
     fn run_script(
-        &self,
+        &mut self,
         with_processes: bool,
         with_extras: bool,
         with_host: bool,
     ) -> Result<String, CollectError> {
+        let mut last_error = None;
+        for attempt in 0..2 {
+            self.ensure_session()?;
+            match self.exec_script(with_processes, with_extras, with_host) {
+                Ok(out) => return Ok(out),
+                Err(error) => {
+                    // Drop the connection; the next attempt reconnects.
+                    self.session = None;
+                    if attempt == 1 {
+                        last_error = Some(error);
+                    }
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| CollectError::Remote("ssh failed".into())))
+    }
+
+    fn ensure_session(&mut self) -> Result<(), CollectError> {
+        if self.session.as_ref().is_some_and(Session::authenticated) {
+            return Ok(());
+        }
+        self.session = Some(self.connect()?);
+        Ok(())
+    }
+
+    fn connect(&self) -> Result<Session, CollectError> {
         let (host, port) = resolve_endpoint(&self.host, self.ssh_port);
         let addr = resolve_host(&host, port, self.connect_timeout)?;
         let tcp = TcpStream::connect_timeout(&addr, self.connect_timeout)
@@ -273,21 +303,37 @@ impl RemoteCollector {
         session
             .handshake()
             .map_err(|e| CollectError::Remote(format!("handshake {addr}: {e}")))?;
-
         self.authenticate(&session)?;
-
         session.set_timeout(self.exec_timeout.as_millis() as u32);
+        Ok(session)
+    }
+
+    fn exec_script(
+        &mut self,
+        with_processes: bool,
+        with_extras: bool,
+        with_host: bool,
+    ) -> Result<String, CollectError> {
+        let alias = self.alias.clone();
+        let top_n = self.top_n;
+        let timeout = self.exec_timeout;
+        let extras_args = self.extras_args.clone();
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| CollectError::Remote("ssh session missing".into()))?;
+        session.set_timeout(timeout.as_millis() as u32);
         let mut channel = session
             .channel_session()
             .map_err(|e| CollectError::Remote(format!("channel: {e}")))?;
 
-        let mut args = format!("--alias {} --topn {}", self.alias, self.top_n);
+        let mut args = format!("--alias {alias} --topn {top_n}");
         if with_processes {
             args.push_str(" --processes");
         }
-        if with_extras && !self.extras_args.is_empty() {
+        if with_extras && !extras_args.is_empty() {
             args.push(' ');
-            args.push_str(&self.extras_args);
+            args.push_str(&extras_args);
         }
         if with_host {
             args.push_str(" --host");

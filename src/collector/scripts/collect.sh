@@ -47,6 +47,15 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$ALIAS" ] || ALIAS="remote"
 
+# Bound commands that can block on a dead mount or a stuck daemon.
+tmo() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 4 "$@"
+  else
+    "$@"
+  fi
+}
+
 now_ms() {
   local t="${EPOCHREALTIME:-}"
   if [ -n "$t" ]; then
@@ -82,7 +91,7 @@ MT=${MT:-0}; MU=${MU:-0}; MA=${MA:-0}
 # ---------- gpu ----------
 GPU_JSON='{"state":"absent"}'
 if command -v nvidia-smi >/dev/null 2>&1; then
-  if SMI_OUT=$(nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu \
+  if SMI_OUT=$(tmo nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu \
         --format=csv,noheader,nounits 2>/dev/null); then
     if [ -n "$SMI_OUT" ]; then
       GPUS=$(printf '%s\n' "$SMI_OUT" | awk -F', *' '
@@ -108,7 +117,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
       GPU_JSON='{"state":"absent"}'
     fi
   else
-    SMI_ERR=$(nvidia-smi 2>&1 >/dev/null | head -c 200 | tr -d '"\\\r\n')
+    SMI_ERR=$(tmo nvidia-smi 2>&1 >/dev/null | head -c 200 | tr -d '"\\\r\n')
     GPU_JSON="{\"state\":\"error\",\"message\":\"nvidia-smi failed: ${SMI_ERR}\"}"
   fi
 fi
@@ -123,10 +132,10 @@ printf '{"schema_version":2,"ts_ms":%s,"server":"%s","mode":"remote","collect_ms
 if [ "$EMIT_PROCESSES" = "1" ]; then
   TOTAL=$(ls /proc 2>/dev/null | grep -c '^[0-9]')
   # GNU ps: nlwp = light-weight processes (threads), rss in KiB.
-  TOTAL_THREADS=$(ps -e -o nlwp= 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
+  TOTAL_THREADS=$(tmo ps -e -o nlwp= 2>/dev/null | awk '{s+=$1} END{printf "%d", s+0}')
   TOTAL_THREADS=${TOTAL_THREADS:-0}
-  STATE_JSON=$(ps -eo state= 2>/dev/null | awk '{s=$1; if (s=="") s="?"; c[s]++} END{first=1; for (k in c) {printf "%s\"%s\":%d", (first?"":","), k, c[k]; first=0}}')
-  ROWS=$(ps -eo pid=,ppid=,pcpu=,pmem=,state=,time=,nlwp=,rss=,user=,comm= --sort=-pcpu 2>/dev/null | head -n "$TOPN" | while read -r pid ppid pcpu pmem st tm nlwp rss user comm; do
+  STATE_JSON=$(tmo ps -eo state= 2>/dev/null | awk '{s=$1; if (s=="") s="?"; c[s]++} END{first=1; for (k in c) {printf "%s\"%s\":%d", (first?"":","), k, c[k]; first=0}}')
+  ROWS=$(tmo ps -eo pid=,ppid=,pcpu=,pmem=,state=,time=,nlwp=,rss=,user=,comm= --sort=-pcpu 2>/dev/null | head -n "$TOPN" | while read -r pid ppid pcpu pmem st tm nlwp rss user comm; do
     [ -n "$pid" ] || continue
     uid=$(awk '/^Uid:/{print $2; exit}' /proc/$pid/status 2>/dev/null)
     gid=$(awk '/^Gid:/{print $2; exit}' /proc/$pid/status 2>/dev/null)
@@ -175,7 +184,7 @@ if [ "$EMIT_PROCESSES" = "1" ]; then
     }')
   GPU_PROC_JSON=""
   if command -v nvidia-smi >/dev/null 2>&1; then
-    GPU_PROC_JSON=$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
+    GPU_PROC_JSON=$(tmo nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory \
       --format=csv,noheader,nounits 2>/dev/null | awk -F', *' '
       function esc(s,   i,c,out) {
         out="";
@@ -255,18 +264,18 @@ if [ "$EX_CPU" = 1 ] || [ "$EX_MEM" = 1 ] || [ "$EX_DISK" = 1 ] || \
   fi
   if [ "$EX_FS" = 1 ]; then
     echo "## filesystems"
-    df -P -T -B1 2>/dev/null
+    tmo df -P -T -B1 2>/dev/null
   fi
   if [ "$EX_GPU" = 1 ] && command -v nvidia-smi >/dev/null 2>&1; then
     echo "## gpu_detail"
-    nvidia-smi --query-gpu=index,power.draw,fan.speed,clocks.sm,clocks.mem,pstate,clocks_throttle_reasons.active \
+    tmo nvidia-smi --query-gpu=index,power.draw,fan.speed,clocks.sm,clocks.mem,pstate,clocks_throttle_reasons.active \
       --format=csv,noheader,nounits 2>/dev/null || true
   fi
   if [ "$EX_SLURM" = 1 ] && command -v sinfo >/dev/null 2>&1; then
     echo "## slurm_nodes"
-    sinfo -N -h -o '%T %c %C %G' 2>/dev/null || true
+    tmo sinfo -N -h -o '%T %c %C %G' 2>/dev/null || true
     echo "## slurm_jobs"
-    squeue -h -o '%t' 2>/dev/null || true
+    tmo squeue -h -o '%t' 2>/dev/null || true
   fi
 fi
 exit 0
