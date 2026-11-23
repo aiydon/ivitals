@@ -158,7 +158,6 @@ export function DateRangeBar({
               }}
             />
           </label>
-          <span className="muted tiny">本地日期（磁盘按 UTC 分区存储）</span>
         </div>
       )}
     </div>

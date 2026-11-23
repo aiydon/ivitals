@@ -73,7 +73,7 @@ export function ProcessPanel({
       <div className="section-head">
         <div>
           <h2>进程</h2>
-          <p className="section-sub">当天最后一个完整快照，按 CPU 降序</p>
+          <p className="section-sub">当天最后一个快照</p>
         </div>
         <span className="section-meta mono">{server} · top {top}</span>
       </div>
@@ -124,7 +124,7 @@ export function ProcessPanel({
           </div>
           {Date.now() - data.tsMs > Math.max(meta.processIntervalSecs * 3000, 300_000) && (
             <div className="notice warn">
-              最后一个进程快照是 {relativeTime(data.tsMs)}，采集可能中断；上方时间范围仍会显示历史快照。
+              快照已是 {relativeTime(data.tsMs)}，采集可能中断。
             </div>
           )}
           {data.stateCounts && (

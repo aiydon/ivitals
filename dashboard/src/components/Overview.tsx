@@ -94,7 +94,7 @@ export function OverviewPanel({
         <div>
           <h2>当前状态</h2>
           <p className="section-sub">
-            最后一条 metrics · {host?.hostname ?? "—"} · {host?.os ?? server.mode}
+            {host?.hostname ?? "—"} · {host?.os ?? server.mode}
           </p>
         </div>
         <div className="section-status">

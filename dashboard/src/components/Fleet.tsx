@@ -402,9 +402,7 @@ export function FleetPanel({
       <div className="section-head">
         <div>
           <h2>历史分析</h2>
-          <p className="section-sub">
-            按时间范围聚合每台主机，用于复盘；右上状态点只表示当前是否在线
-          </p>
+          <p className="section-sub">所选范围的聚合，用于复盘</p>
         </div>
         <div className="section-actions">
           <button className="ghost" onClick={copySummary} disabled={!rows}>
@@ -429,16 +427,13 @@ export function FleetPanel({
         }}
       />
 
-      <div className="fleet-toolbar">
-        <span className={`scan-state ${scanning ? "busy" : ""}`} aria-live="polite">
-          {scanning ? "正在聚合所选范围…" : rows ? "已聚合" : "等待数据"}
-        </span>
-        {rows && (
-          <span className="muted small mono">
-            {rows.reduce((sum, row) => sum + row.samples, 0).toLocaleString()} samples
+      {scanning && (
+        <div className="fleet-toolbar">
+          <span className="scan-state busy" aria-live="polite">
+            聚合中…
           </span>
-        )}
-      </div>
+        </div>
+      )}
 
       {error && (
         <div className="notice error">
@@ -464,7 +459,18 @@ export function FleetPanel({
             value={totals.coverage === null ? "—" : `${totals.coverage.toFixed(1)}%`}
             note="按主机平均"
           />
-          <Kpi label="GPU" value={String(totals.gpus)} note="当前识别数量" />
+          <Kpi
+            label="GPU"
+            value={String(totals.gpus)}
+            note={
+              rows && rows.some((row) => row.gpus > 0)
+                ? rows
+                    .filter((row) => row.gpus > 0)
+                    .map((row) => `${row.alias} ${row.gpus}`)
+                    .join(" · ")
+                : "无 GPU"
+            }
+          />
           <Kpi
             label="最长缺口"
             value={totals.largestGap > 0 ? formatDuration(totals.largestGap * 1000) : "无"}
@@ -555,12 +561,13 @@ export function FleetPanel({
                 }
               >
                 <strong className="stat-value">
-                  {row.gpuAvg === null ? "无" : formatPercent(row.gpuAvg)}
+                  {row.gpuAvg === null ? "—" : formatPercent(row.gpuAvg)}
                 </strong>
-                {row.gpus > 0 ? (
-                  <MiniMeter value={row.gpuAvg} tone="gpu" />
-                ) : (
-                  <span className="stat-note mono">无 GPU</span>
+                {row.gpus > 0 && (
+                  <>
+                    <MiniMeter value={row.gpuAvg} tone="gpu" />
+                    <span className="stat-note mono">{row.gpus} 张</span>
+                  </>
                 )}
               </span>
 
@@ -582,8 +589,8 @@ export function FleetPanel({
                 </strong>
                 <MiniMeter value={row.latestFs} tone="disk" />
                 <span className="stat-note mono">
-                  {formatBytesCompact(row.fsUsedBytes)} /{" "}
-                  {formatBytesCompact(row.fsTotalBytes)}
+                  ↓{formatRateCompact(row.latestRead)} ↑
+                  {formatRateCompact(row.latestWrite)}
                 </span>
               </span>
 
@@ -643,9 +650,6 @@ export function FleetPanel({
         </div>
       )}
 
-      <p className="fleet-hint muted small">
-        数字是所选时间范围的平均/峰值，不是当前瞬时值。点击任意主机进入单机视图。
-      </p>
     </section>
   );
 }

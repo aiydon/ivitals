@@ -635,7 +635,7 @@ export function SeriesPanel({
       <div className="section-head">
         <div>
           <h2>时序</h2>
-          <p className="section-sub">按时间桶聚合，原始 JSONL 流式扫描</p>
+          <p className="section-sub">所选范围的时间序列</p>
         </div>
         <span className="section-meta mono">{server} · CPU · 内存 · GPU</span>
       </div>
@@ -706,24 +706,22 @@ export function SeriesPanel({
           {data.missingDates.length > 0 && (
             <span className="warn-text">缺失 {data.missingDates.length} 天</span>
           )}
-          <span className="muted">日期与时间轴均为本地时区</span>
         </div>
       )}
 
       {data && gaps.length > 0 && (
         <div className="notice warn">
-          <strong>数据中断</strong>
+          <strong>{gaps.length} 段采集中断</strong>
           <p>
-            所选范围内有 {gaps.length} 段内部缺口，最大{" "}
-            {formatDuration(Math.max(...gaps.map((gap) => gap.seconds)) * 1000)}。
-            折线在缺口处断开，历史数据未被补写或伪造。
+            最长 {formatDuration(Math.max(...gaps.map((gap) => gap.seconds)) * 1000)}
+            ，折线在缺口处断开。
           </p>
         </div>
       )}
       {data?.truncated && (
         <div className="banner warn">
-          <strong>扫描结果被截断</strong>
-          <p>已达到行数或字节上限，图表只覆盖部分数据。请缩小日期范围。</p>
+          <strong>结果被截断</strong>
+          <p>请缩小日期范围。</p>
         </div>
       )}
       {data && data.warnings.length > 0 && (

@@ -215,7 +215,7 @@ export function App() {
 
   const title = isFleet ? "集群总览" : (selectedServer?.alias ?? "主机");
   const lede = isFleet
-    ? `${hostRows.length} 台主机 · 历史聚合 · 统计范围随选择更新`
+    ? `${hostRows.length} 台主机 · 历史聚合`
     : selectedServer
       ? [
           hostMeta?.hostname,

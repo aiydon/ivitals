@@ -202,7 +202,7 @@ export function CorePanel({
       <div className="section-head">
         <div>
           <h2>多核</h2>
-          <p className="section-sub">每个时间桶内的每核心平均利用率</p>
+          <p className="section-sub">每核心平均利用率</p>
         </div>
         <span className="section-meta mono">{server} · per-core heatmap</span>
       </div>
