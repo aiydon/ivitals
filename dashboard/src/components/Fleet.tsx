@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ClipboardCheck, Copy } from "lucide-react";
 
 import { api } from "../api";
@@ -282,6 +282,9 @@ export function FleetPanel({
   const [copied, setCopied] = useState<"idle" | "ok" | "manual">("idle");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "online" | "issues">("all");
+  const [autoTick, setAutoTick] = useState(0);
+  const scanningRef = useRef(false);
+  const rangeKeyRef = useRef("");
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
@@ -292,14 +295,30 @@ export function FleetPanel({
   const servers = overview?.servers ?? [];
   const serverKey = servers.map((server) => server.alias).join(",");
 
+  // Historical analysis still needs to stay current: refresh once a minute,
+  // but never start a second scan while the previous one is running.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!scanningRef.current && document.visibilityState === "visible") {
+        setAutoTick((value) => value + 1);
+      }
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     if (!from || !to || servers.length === 0) return;
     const controller = new AbortController();
+    scanningRef.current = true;
     setScanning(true);
     setError(null);
     const SCAN_CONCURRENCY = 4;
     const collected: HostHistory[] = [];
-    setRows(null);
+    const rangeKey = `${from}|${to}|${serverKey}`;
+    if (rangeKeyRef.current !== rangeKey) {
+      rangeKeyRef.current = rangeKey;
+      setRows(null);
+    }
     const scanOne = async (server: OverviewServer): Promise<HostHistory> => {
       try {
         const series = await api.series(
@@ -369,11 +388,15 @@ export function FleetPanel({
         }
       })
       .finally(() => {
+        scanningRef.current = false;
         if (!controller.signal.aborted) setScanning(false);
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      scanningRef.current = false;
+    };
     // serverKey tracks host-set changes without depending on object identity.
-  }, [from, to, serverKey, reloadToken]);
+  }, [from, to, serverKey, reloadToken, autoTick]);
 
   const totals = useMemo(() => {
     if (!rows) return null;
