@@ -4,3 +4,6 @@ dashboard/node_modules/
 dashboard/dist/
 dashboard/ivitals.log
 dashboard/ivitals.pid
+
+ivitals.log
+ivitals.pid

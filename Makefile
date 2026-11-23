@@ -5,7 +5,7 @@
 
 DASHBOARD := dashboard
 
-.PHONY: install dev build start start-bg stop clean
+.PHONY: install dev build start start-bg stop clean collector-start collector-stop
 
 install:
 	cd $(DASHBOARD) && bun install
@@ -37,3 +37,13 @@ stop:
 clean:
 	@echo "removing dashboard build artifacts only (data/ is untouched)"
 	rm -rf $(DASHBOARD)/dist
+
+collector-start:
+	@pgrep -f '^./target/release/ivitals$$' >/dev/null && echo "collector already running" || (setsid nohup ./target/release/ivitals > ivitals.log 2>&1 &)
+	@sleep 1
+	@pgrep -f '^./target/release/ivitals$$' > ivitals.pid && echo "collector pid $$(cat ivitals.pid); log: ivitals.log"
+
+collector-stop:
+	@if [ -f ivitals.pid ]; then kill -INT $$(cat ivitals.pid) 2>/dev/null || true; rm -f ivitals.pid; fi
+	@for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -f '^./target/release/ivitals$$' >/dev/null || break; sleep 0.3; done
+	@pgrep -f '^./target/release/ivitals$$' >/dev/null && echo "collector still running" || echo "collector stopped"

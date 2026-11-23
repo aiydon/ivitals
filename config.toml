@@ -60,3 +60,13 @@ exec_timeout_secs = 15
 [[servers]]
 alias = "local"
 mode = "local"
+
+# data@data.iydon.top (data node). Public key auth only.
+[[servers]]
+alias = "data"
+mode = "remote"
+ssh_host = "data.iydon.top"
+ssh_user = "data"
+ssh_key = "/home/math/.ssh/id_ed25519"
+connect_timeout_secs = 5
+exec_timeout_secs = 15
