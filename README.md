@@ -289,6 +289,18 @@ audience only.
 See `dashboard/README.md` for the API, environment overrides
 (`IVITALS_CONFIG`, `IVITALS_DATA_DIR`, `PORT`, `HOST`) and scan limits.
 
+## Operations
+
+```bash
+make collector-start   # detached collector; log: ivitals.log, pid: ivitals.pid
+make collector-stop
+make start-bg          # detached dashboard on 0.0.0.0:8899
+make stop
+```
+
+Both run outside the terminal (`setsid nohup`), so closing SSH does not stop
+monitoring. The dashboard reconnects automatically after a restart.
+
 ## Testing
 
 ```bash
