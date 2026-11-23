@@ -682,16 +682,19 @@ a:focus-visible {
 .fleet-row {
   display: grid;
   grid-template-columns:
-    minmax(172px, 1.5fr) minmax(186px, 1.6fr) minmax(126px, 1.05fr)
-    minmax(88px, 0.74fr) minmax(142px, 1.16fr) minmax(94px, 0.8fr)
-    minmax(112px, 0.92fr);
-  gap: 14px;
+    minmax(190px, 1.8fr) minmax(200px, 1.75fr) minmax(122px, 1.05fr)
+    minmax(152px, 1.2fr) minmax(96px, 0.85fr) minmax(120px, 1fr);
+  gap: 18px;
   align-items: center;
   justify-content: start;
 }
 
 .fleet-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   padding: 9px 10px;
+  background: var(--surface);
   color: var(--muted);
   font-size: 11px;
 }
@@ -947,10 +950,36 @@ a:focus-visible {
 
 .fleet-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  min-height: 18px;
-  margin: 2px 0 8px;
+  gap: 10px;
+  margin: 2px 0 10px;
+}
+
+.fleet-search {
+  flex: 1 1 200px;
+  min-width: 180px;
+  max-width: 300px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--raised);
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.fleet-search::placeholder {
+  color: var(--muted);
+}
+
+.filter-chips {
+  display: flex;
+  gap: 6px;
+}
+
+.fleet-toolbar .scan-state {
+  margin-left: auto;
 }
 
 .scan-state {
@@ -1868,6 +1897,10 @@ tbody tr:hover {
 
   .fleet-history {
     min-width: 0;
+  }
+
+  .fleet-search {
+    max-width: none;
   }
 
   .fleet-head {

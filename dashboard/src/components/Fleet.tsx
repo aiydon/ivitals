@@ -278,6 +278,8 @@ export function FleetPanel({
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<"idle" | "ok" | "manual">("idle");
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "online" | "issues">("all");
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
@@ -293,62 +295,72 @@ export function FleetPanel({
     const controller = new AbortController();
     setScanning(true);
     setError(null);
-    Promise.all(
-      servers.map(async (server) => {
-        try {
-          const series = await api.series(
-            { server: server.alias, from, to, maxPoints: MAX_POINTS },
-            controller.signal,
-          );
-          return summarize(
-            server,
-            series.points,
-            series.coveragePercent,
-            series.samples,
-            series.gaps.length,
-            series.largestGapSecs,
-            series.latestGpus,
-          );
-        } catch (cause) {
-          if (controller.signal.aborted) throw cause;
-          return {
-            alias: server.alias,
-            mode: server.mode,
-            status: server.status,
-            hostMeta: server.hostMeta,
-            gpus: server.gpus.length,
-            points: [],
-            fsMax: null,
-            fsUsedBytes: null,
-            fsTotalBytes: null,
-            memUsedBytes: null,
-            memTotalBytes: null,
-            latestMem: null,
-            latestCpu: null,
-            gpuUsedBytes: null,
-            gpuTotalBytes: null,
-            latestFs: null,
-            latestRead: null,
-            latestWrite: null,
-            diskRead: null,
-            diskWrite: null,
-            cpuAvg: null,
-            cpuP95: null,
-            cpuMax: null,
-            memAvg: null,
-            gpuAvg: null,
-            ioAvg: null,
-            coverage: null,
-            samples: 0,
-            gaps: 0,
-            largestGapSecs: 0,
-            lastPointMs: null,
-            error: cause instanceof Error ? cause.message : String(cause),
-          } satisfies HostHistory;
-        }
-      }),
-    )
-      .then((result) => setRows(result))
+    const SCAN_CONCURRENCY = 4;
+    const collected: HostHistory[] = [];
+    setRows(null);
+    const scanOne = async (server: OverviewServer): Promise<HostHistory> => {
+      try {
+        const series = await api.series(
+          { server: server.alias, from, to, maxPoints: MAX_POINTS },
+          controller.signal,
+        );
+        return summarize(
+          server,
+          series.points,
+          series.coveragePercent,
+          series.samples,
+          series.gaps.length,
+          series.largestGapSecs,
+          series.latestGpus,
+        );
+      } catch (cause) {
+        if (controller.signal.aborted) throw cause;
+        return {
+          alias: server.alias,
+          mode: server.mode,
+          status: server.status,
+          hostMeta: server.hostMeta,
+          gpus: server.gpus.length,
+          points: [],
+          fsMax: null,
+          fsUsedBytes: null,
+          fsTotalBytes: null,
+          memUsedBytes: null,
+          memTotalBytes: null,
+          latestMem: null,
+          latestCpu: null,
+          gpuUsedBytes: null,
+          gpuTotalBytes: null,
+          latestFs: null,
+          latestRead: null,
+          latestWrite: null,
+          diskRead: null,
+          diskWrite: null,
+          cpuAvg: null,
+          cpuP95: null,
+          cpuMax: null,
+          memAvg: null,
+          gpuAvg: null,
+          ioAvg: null,
+          coverage: null,
+          samples: 0,
+          gaps: 0,
+          largestGapSecs: 0,
+          lastPointMs: null,
+          error: cause instanceof Error ? cause.message : String(cause),
+        } satisfies HostHistory;
+      }
+    };
+    (async () => {
+      // Bounded fan-out: scanning a large fleet must not spawn one worker per
+      // host at once. Results stream in as each batch finishes.
+      for (let i = 0; i < servers.length; i += SCAN_CONCURRENCY) {
+        if (controller.signal.aborted) return;
+        const batch = servers.slice(i, i + SCAN_CONCURRENCY);
+        collected.push(...(await Promise.all(batch.map(scanOne))));
+        if (!controller.signal.aborted) setRows([...collected]);
+      }
+    })()
       .catch((cause) => {
         if (!controller.signal.aborted) {
           setError(cause instanceof Error ? cause.message : String(cause));
@@ -383,6 +395,19 @@ export function FleetPanel({
         : 0;
     return { samples, coverage, gpus, largestGap, days };
   }, [rows, from, to]);
+
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return (rows ?? []).filter((row) => {
+      if (statusFilter === "online" && row.status !== "online") return false;
+      if (statusFilter === "issues" && row.status === "online") return false;
+      if (!needle) return true;
+      return (
+        row.alias.toLowerCase().includes(needle) ||
+        (row.hostMeta?.hostname ?? "").toLowerCase().includes(needle)
+      );
+    });
+  }, [rows, query, statusFilter]);
 
   const copySummary = async () => {
     if (!rows) return;
@@ -427,13 +452,43 @@ export function FleetPanel({
         }}
       />
 
-      {scanning && (
-        <div className="fleet-toolbar">
+      <div className="fleet-toolbar">
+        <input
+          className="fleet-search"
+          type="search"
+          value={query}
+          placeholder="搜索主机或 hostname"
+          aria-label="搜索主机"
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <div className="filter-chips" role="group" aria-label="主机状态筛选">
+          {(
+            [
+              ["all", "全部"],
+              ["online", "在线"],
+              ["issues", "异常"],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              className={`chip-button ${statusFilter === key ? "active" : ""}`}
+              onClick={() => setStatusFilter(key)}
+              aria-pressed={statusFilter === key}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <span className="muted small mono">
+          {visible.length}/{rows?.length ?? 0} 台
+        </span>
+        {scanning && (
           <span className="scan-state busy" aria-live="polite">
             聚合中…
           </span>
-        </div>
-      )}
+        )}
+      </div>
 
       {error && (
         <div className="notice error">
@@ -452,7 +507,7 @@ export function FleetPanel({
             value={`${totals.days} 天`}
             note={`${from.slice(5)} → ${to.slice(5)}`}
           />
-          <Kpi label="主机" value={String(rows?.length ?? 0)} note="参与聚合" />
+          <Kpi label="主机" value={String(servers.length)} note="参与聚合" />
           <Kpi label="总样本" value={totals.samples.toLocaleString()} note="metrics 行数" />
           <Kpi
             label="平均覆盖"
@@ -485,12 +540,11 @@ export function FleetPanel({
             <span>主机</span>
             <span>CPU 走势</span>
             <span>内存</span>
-            <span>GPU</span>
             <span>磁盘</span>
             <span>覆盖</span>
             <span>最后数据</span>
           </div>
-          {(rows ?? []).map((row) => (
+          {visible.map((row) => (
             <button
               type="button"
               className="fleet-row fleet-row-button"
@@ -500,7 +554,15 @@ export function FleetPanel({
             >
               <span
                 className="fleet-host"
-                title={`${row.alias}${row.hostMeta?.hostname ? ` (${row.hostMeta.hostname})` : ""}\n${row.hostMeta?.os ?? row.mode}`}
+                title={[
+                  `${row.alias}${row.hostMeta?.hostname ? ` (${row.hostMeta.hostname})` : ""}`,
+                  row.hostMeta?.os ?? row.mode,
+                  row.gpus > 0
+                    ? `GPU ${row.gpus} 张 · 平均 ${formatPercent(row.gpuAvg)} · 显存 ${formatBytes(
+                        row.gpuUsedBytes,
+                      )} / ${formatBytes(row.gpuTotalBytes)}`
+                    : "无 NVIDIA GPU",
+                ].join("\n")}
               >
                 <span className="fleet-title">
                   <strong>{row.alias}</strong>
@@ -547,28 +609,6 @@ export function FleetPanel({
                   {formatBytesCompact(row.memUsedBytes)} /{" "}
                   {formatBytesCompact(row.memTotalBytes)}
                 </span>
-              </span>
-
-              <span
-                className="fleet-stat"
-                data-label="GPU"
-                title={
-                  row.gpus > 0
-                    ? `区间均值 ${formatPercent(row.gpuAvg)}\n最新显存 ${formatBytes(
-                        row.gpuUsedBytes,
-                      )} / ${formatBytes(row.gpuTotalBytes)}`
-                    : "未检测到 NVIDIA GPU"
-                }
-              >
-                <strong className="stat-value">
-                  {row.gpuAvg === null ? "—" : formatPercent(row.gpuAvg)}
-                </strong>
-                {row.gpus > 0 && (
-                  <>
-                    <MiniMeter value={row.gpuAvg} tone="gpu" />
-                    <span className="stat-note mono">{row.gpus} 张</span>
-                  </>
-                )}
               </span>
 
               <span
@@ -627,6 +667,9 @@ export function FleetPanel({
             </button>
           ))}
         </div>
+        {visible.length === 0 && rows !== null && rows.length > 0 && (
+          <div className="empty-state">没有匹配的主机</div>
+        )}
       </div>
 
       {!rows && scanning && (
