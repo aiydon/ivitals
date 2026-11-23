@@ -292,7 +292,12 @@ export function App() {
             <Database size={13} strokeWidth={1.5} aria-hidden="true" />
             <span>…/{meta.dataDir.split("/").slice(-2).join("/")}</span>
           </div>
-          <div className="mono tiny">{meta.dates.length} 个本地日期</div>
+          <div
+            className="mono tiny"
+            title="按本地日期统计，来自 data/ 下的 UTC 分区"
+          >
+            数据 {meta.dates.length} 天
+          </div>
         </div>
       </aside>
 

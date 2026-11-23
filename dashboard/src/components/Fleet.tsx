@@ -243,13 +243,15 @@ function Kpi({
   label,
   value,
   note,
+  title,
 }: {
   label: string;
   value: string;
   note?: string;
+  title?: string;
 }) {
   return (
-    <div className="kpi">
+    <div className="kpi" title={title}>
       <span className="kpi-label">{label}</span>
       <strong className="kpi-value">{value}</strong>
       {note && <span className="kpi-note mono">{note}</span>}
@@ -519,11 +521,14 @@ export function FleetPanel({
             value={String(totals.gpus)}
             note={
               rows && rows.some((row) => row.gpus > 0)
-                ? rows
-                    .filter((row) => row.gpus > 0)
-                    .map((row) => `${row.alias} ${row.gpus}`)
-                    .join(" · ")
+                ? `${rows.filter((row) => row.gpus > 0).length} 台主机`
                 : "无 GPU"
+            }
+            title={
+              rows
+                ?.filter((row) => row.gpus > 0)
+                .map((row) => `${row.alias} ×${row.gpus}`)
+                .join("\n") || "未检测到 NVIDIA GPU"
             }
           />
           <Kpi
@@ -540,6 +545,7 @@ export function FleetPanel({
             <span>主机</span>
             <span>CPU 走势</span>
             <span>内存</span>
+            <span>GPU</span>
             <span>磁盘</span>
             <span>覆盖</span>
             <span>最后数据</span>
@@ -609,6 +615,28 @@ export function FleetPanel({
                   {formatBytesCompact(row.memUsedBytes)} /{" "}
                   {formatBytesCompact(row.memTotalBytes)}
                 </span>
+              </span>
+
+              <span
+                className="fleet-stat"
+                data-label="GPU"
+                title={
+                  row.gpus > 0
+                    ? `区间均值 ${formatPercent(row.gpuAvg)}\n最新显存 ${formatBytes(
+                        row.gpuUsedBytes,
+                      )} / ${formatBytes(row.gpuTotalBytes)}`
+                    : "未检测到 NVIDIA GPU"
+                }
+              >
+                <strong className="stat-value">
+                  {row.gpuAvg === null ? "—" : formatPercent(row.gpuAvg)}
+                </strong>
+                {row.gpus > 0 && (
+                  <>
+                    <MiniMeter value={row.gpuAvg} tone="gpu" />
+                    <span className="stat-note mono">{row.gpus} 张</span>
+                  </>
+                )}
               </span>
 
               <span
