@@ -4,6 +4,8 @@ import { ClipboardCheck, Copy } from "lucide-react";
 import { api } from "../api";
 import { DateRangeBar } from "./DateRangeBar";
 import {
+  formatBytes,
+  formatBytesCompact,
   formatDateTime,
   formatDuration,
   formatPercent,
@@ -12,6 +14,7 @@ import {
   relativeTime,
 } from "../format";
 import type {
+  GpuInfo,
   MetaResponse,
   OverviewResponse,
   OverviewServer,
@@ -35,6 +38,17 @@ interface HostHistory {
   gpus: number;
   points: SeriesPoint[];
   fsMax: number | null;
+  fsUsedBytes: number | null;
+  fsTotalBytes: number | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
+  latestMem: number | null;
+  latestCpu: number | null;
+  gpuUsedBytes: number | null;
+  gpuTotalBytes: number | null;
+  latestFs: number | null;
+  latestRead: number | null;
+  latestWrite: number | null;
   diskRead: number | null;
   diskWrite: number | null;
   cpuAvg: number | null;
@@ -90,6 +104,7 @@ function summarize(
   samples: number,
   gaps: number,
   largestGapSecs: number,
+  latestGpus: GpuInfo[],
 ): HostHistory {
   const cpu = weighted(points, "cpu");
   const mem = weighted(points, "mem");
@@ -108,6 +123,7 @@ function summarize(
           : Math.max(max, point.fsUsedMax),
     null,
   );
+  const last = points.length > 0 ? points[points.length - 1] : null;
   return {
     alias: server.alias,
     mode: server.mode,
@@ -116,6 +132,23 @@ function summarize(
     gpus: server.gpus.length,
     points,
     fsMax,
+    fsUsedBytes: last?.fsUsedBytes ?? null,
+    fsTotalBytes: last?.fsTotalBytes ?? null,
+    memUsedBytes: last?.memUsedBytes ?? null,
+    memTotalBytes: last?.memTotalBytes ?? null,
+    latestMem: last?.mem ?? null,
+    latestCpu: last?.cpu ?? null,
+    gpuUsedBytes:
+      latestGpus.length > 0
+        ? latestGpus.reduce((sum, gpu) => sum + gpu.memUsedMb, 0) * 1024 * 1024
+        : null,
+    gpuTotalBytes:
+      latestGpus.length > 0
+        ? latestGpus.reduce((sum, gpu) => sum + gpu.memTotalMb, 0) * 1024 * 1024
+        : null,
+    latestFs: last?.fsUsedMax ?? fsMax,
+    latestRead: last?.diskRead ?? null,
+    latestWrite: last?.diskWrite ?? null,
     diskRead: read.avg,
     diskWrite: write.avg,
     cpuAvg: cpu.avg,
@@ -133,9 +166,15 @@ function summarize(
   };
 }
 
-function Sparkline({ points }: { points: SeriesPoint[] }) {
+function Sparkline({
+  points,
+  field = "cpu",
+}: {
+  points: SeriesPoint[];
+  field?: "cpu" | "mem";
+}) {
   const raw = points
-    .map((point) => point.cpu)
+    .map((point) => point[field])
     .filter((value): value is number => value !== null);
   if (raw.length < 2) return null;
   const step = Math.ceil(raw.length / 80);
@@ -144,12 +183,14 @@ function Sparkline({ points }: { points: SeriesPoint[] }) {
     const slice = raw.slice(i, i + step);
     samples.push(slice.reduce((sum, value) => sum + value, 0) / slice.length);
   }
-  const max = Math.max(...samples, 1);
+  const lo = Math.min(...samples);
+  const hi = Math.max(...samples);
+  const span = Math.max(hi - lo, 0.5);
   const width = 100;
   const height = 26;
   const coords = samples.map((value, index) => {
     const x = (index / Math.max(1, samples.length - 1)) * width;
-    const y = height - 2 - (value / max) * (height - 4);
+    const y = height - 2 - ((value - lo) / span) * (height - 4);
     return [x, y] as const;
   });
   const line = coords
@@ -158,7 +199,7 @@ function Sparkline({ points }: { points: SeriesPoint[] }) {
   const area = `${line} L${width} ${height} L0 ${height} Z`;
   return (
     <svg
-      className="sparkline"
+      className={`sparkline ${field}`}
       viewBox={`0 0 ${width} ${height}`}
       preserveAspectRatio="none"
       aria-hidden="true"
@@ -266,6 +307,7 @@ export function FleetPanel({
             series.samples,
             series.gaps.length,
             series.largestGapSecs,
+            series.latestGpus,
           );
         } catch (cause) {
           if (controller.signal.aborted) throw cause;
@@ -277,6 +319,17 @@ export function FleetPanel({
             gpus: server.gpus.length,
             points: [],
             fsMax: null,
+            fsUsedBytes: null,
+            fsTotalBytes: null,
+            memUsedBytes: null,
+            memTotalBytes: null,
+            latestMem: null,
+            latestCpu: null,
+            gpuUsedBytes: null,
+            gpuTotalBytes: null,
+            latestFs: null,
+            latestRead: null,
+            latestWrite: null,
             diskRead: null,
             diskWrite: null,
             cpuAvg: null,
@@ -439,7 +492,10 @@ export function FleetPanel({
               onClick={() => onSelect(row.alias)}
               aria-label={`查看 ${row.alias} 历史`}
             >
-              <span className="fleet-host">
+              <span
+                className="fleet-host"
+                title={`${row.alias}${row.hostMeta?.hostname ? ` (${row.hostMeta.hostname})` : ""}\n${row.hostMeta?.os ?? row.mode}`}
+              >
                 <span className="fleet-title">
                   <strong>{row.alias}</strong>
                   <span className={`status ${row.status}`}>
@@ -454,7 +510,15 @@ export function FleetPanel({
                 {row.error && <span className="fleet-error">{row.error}</span>}
               </span>
 
-              <span className="fleet-stat cpu-stat" data-label="CPU 走势">
+              <span
+                className="fleet-stat cpu-stat"
+                data-label="CPU 走势"
+                title={`区间均值 ${formatPercent(row.cpuAvg)} · p95 ${formatPercent(
+                  row.cpuP95,
+                )} · 峰值 ${formatPercent(row.cpuMax)}\n最新 ${formatPercent(
+                  row.latestCpu,
+                )}`}
+              >
                 <span className="cpu-line">
                   <strong className="stat-value">{formatPercent(row.cpuAvg)}</strong>
                   <span className="stat-note mono">p95 {formatPercent(row.cpuP95)}</span>
@@ -462,12 +526,34 @@ export function FleetPanel({
                 <Sparkline points={row.points} />
               </span>
 
-              <span className="fleet-stat" data-label="内存">
+              <span
+                className="fleet-stat"
+                data-label="内存"
+                title={`区间均值 ${formatPercent(row.memAvg)} · 最新 ${formatPercent(
+                  row.latestMem,
+                )}\n已用 ${formatBytes(row.memUsedBytes)} / 总 ${formatBytes(
+                  row.memTotalBytes,
+                )}`}
+              >
                 <strong className="stat-value">{formatPercent(row.memAvg)}</strong>
-                <MiniMeter value={row.memAvg} tone="mem" />
+                <Sparkline points={row.points} field="mem" />
+                <span className="stat-note mono">
+                  {formatBytesCompact(row.memUsedBytes)} /{" "}
+                  {formatBytesCompact(row.memTotalBytes)}
+                </span>
               </span>
 
-              <span className="fleet-stat" data-label="GPU">
+              <span
+                className="fleet-stat"
+                data-label="GPU"
+                title={
+                  row.gpus > 0
+                    ? `区间均值 ${formatPercent(row.gpuAvg)}\n最新显存 ${formatBytes(
+                        row.gpuUsedBytes,
+                      )} / ${formatBytes(row.gpuTotalBytes)}`
+                    : "未检测到 NVIDIA GPU"
+                }
+              >
                 <strong className="stat-value">
                   {row.gpuAvg === null ? "无" : formatPercent(row.gpuAvg)}
                 </strong>
@@ -478,22 +564,34 @@ export function FleetPanel({
                 )}
               </span>
 
-              <span className="fleet-stat" data-label="磁盘">
+              <span
+                className="fleet-stat"
+                data-label="磁盘"
+                title={`最新 ${formatPercent(row.latestFs)}\n已用 ${formatBytes(
+                  row.fsUsedBytes,
+                )} / 总 ${formatBytes(row.fsTotalBytes)}\n读 ${formatRate(
+                  row.latestRead,
+                )} · 写 ${formatRate(row.latestWrite)}`}
+              >
                 <strong
-                  className={`stat-value ${row.fsMax !== null && row.fsMax >= 90 ? "danger" : ""}`}
+                  className={`stat-value ${
+                    row.latestFs !== null && row.latestFs >= 90 ? "danger" : ""
+                  }`}
                 >
-                  {formatPercent(row.fsMax)}
+                  {formatPercent(row.latestFs)}
                 </strong>
-                <MiniMeter value={row.fsMax} tone="disk" />
-                <span
-                  className="stat-note mono"
-                  title={`读 ${formatRate(row.diskRead)} · 写 ${formatRate(row.diskWrite)}`}
-                >
-                  ↓{formatRateCompact(row.diskRead)} ↑{formatRateCompact(row.diskWrite)}
+                <MiniMeter value={row.latestFs} tone="disk" />
+                <span className="stat-note mono">
+                  {formatBytesCompact(row.fsUsedBytes)} /{" "}
+                  {formatBytesCompact(row.fsTotalBytes)}
                 </span>
               </span>
 
-              <span className="fleet-stat" data-label="覆盖">
+              <span
+                className="fleet-stat"
+                data-label="覆盖"
+                title={`覆盖 ${row.coverage ?? "—"}%（自首个样本起）\n样本 ${row.samples.toLocaleString()}`}
+              >
                 <strong
                   className={`stat-value ${
                     row.coverage !== null && row.coverage < 80 ? "danger" : ""
@@ -510,7 +608,11 @@ export function FleetPanel({
                 </span>
               </span>
 
-              <span className="fleet-time" data-label="最后数据">
+              <span
+                className="fleet-time"
+                data-label="最后数据"
+                title={formatDateTime(row.lastPointMs)}
+              >
                 <strong className="stat-time">{relativeTime(row.lastPointMs)}</strong>
                 <span className="stat-note mono">{formatDateTime(row.lastPointMs)}</span>
               </span>

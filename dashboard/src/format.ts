@@ -49,6 +49,18 @@ export function formatBytes(bytes: number | null): string {
   return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+export function formatBytesCompact(bytes: number | null): string {
+  if (bytes === null) return "—";
+  const units = ["B", "K", "M", "G", "T", "P"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)}${units[unit]}`;
+}
+
 export function formatRateCompact(bytesPerSecond: number | null): string {
   if (bytesPerSecond === null) return "—";
   const units = ["B", "K", "M", "G", "T"];

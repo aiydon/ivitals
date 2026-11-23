@@ -45,6 +45,10 @@ interface Bucket {
   diskWriteN: number;
   diskUtilMax: number | null;
   fsUsedMax: number | null;
+  fsUsedBytes: number | null;
+  fsTotalBytes: number | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
 }
 
 interface ScanMeta {
@@ -223,6 +227,10 @@ async function scanFile(
           diskWriteN: 0,
           diskUtilMax: null,
           fsUsedMax: null,
+          fsUsedBytes: null,
+          fsTotalBytes: null,
+          memUsedBytes: null,
+          memTotalBytes: null,
         };
         buckets.set(idx, b);
       }
@@ -238,6 +246,8 @@ async function scanFile(
         b.memN += 1;
         b.memMax = b.memMax === null ? mem : Math.max(b.memMax, mem);
       }
+      if (used !== null) b.memUsedBytes = used;
+      if (total !== null) b.memTotalBytes = total;
       if (iowait !== null) {
         b.ioSum += iowait;
         b.ioN += 1;
@@ -288,11 +298,26 @@ async function scanFile(
         }
       }
       if (Array.isArray(obj.filesystems)) {
+        // Track the fullest mount of this sample; keep its absolute bytes so
+        // the latest bucket can show "used / total" without a second read.
+        let bestPct: number | null = null;
+        let bestUsed: number | null = null;
+        let bestTotal: number | null = null;
         for (const item of obj.filesystems) {
           if (item === null || typeof item !== "object") continue;
-          const used = num((item as Record<string, unknown>).used_percent);
-          if (used === null) continue;
-          b.fsUsedMax = b.fsUsedMax === null ? used : Math.max(b.fsUsedMax, used);
+          const fs = item as Record<string, unknown>;
+          const pct = num(fs.used_percent);
+          if (pct === null) continue;
+          if (bestPct === null || pct > bestPct) {
+            bestPct = pct;
+            bestUsed = num(fs.used_bytes);
+            bestTotal = num(fs.total_bytes);
+          }
+        }
+        if (bestPct !== null) {
+          b.fsUsedMax = b.fsUsedMax === null ? bestPct : Math.max(b.fsUsedMax, bestPct);
+          b.fsUsedBytes = bestUsed;
+          b.fsTotalBytes = bestTotal;
         }
       }
     }
@@ -414,6 +439,10 @@ async function run(req: SeriesRequest): Promise<SeriesWorkerResult> {
       diskWrite: b.diskWriteN > 0 ? Math.round(b.diskWriteSum / b.diskWriteN) : null,
       diskUtil: b.diskUtilMax === null ? null : round(b.diskUtilMax, 2),
       fsUsedMax: b.fsUsedMax === null ? null : round(b.fsUsedMax),
+      fsUsedBytes: b.fsUsedBytes,
+      fsTotalBytes: b.fsTotalBytes,
+      memUsedBytes: b.memUsedBytes,
+      memTotalBytes: b.memTotalBytes,
       samples: b.samples,
     });
   }
@@ -421,10 +450,17 @@ async function run(req: SeriesRequest): Promise<SeriesWorkerResult> {
   // Reject buckets that somehow fall outside [from, to) (defensive).
   const filtered = points.filter((p) => p.t >= req.fromMs && p.t < req.toMs);
   const effectiveEnd = Math.min(req.toMs, Date.now());
-  const expected = Math.max(0, Math.ceil((effectiveEnd - req.fromMs) / req.bucketMs));
+  const times = filtered.map((point) => point.t);
+  // Coverage starts at the first observed sample: hours before monitoring
+  // began are "not monitored", not lost data.
+  const effectiveStart = times.length > 0 ? times[0] : req.fromMs;
+  const expected = Math.max(
+    0,
+    Math.ceil((effectiveEnd - effectiveStart) / req.bucketMs),
+  );
   const coverageInfo = coverage(
-    filtered.map((point) => point.t),
-    req.fromMs,
+    times,
+    effectiveStart,
     effectiveEnd,
     req.bucketMs,
     expected,

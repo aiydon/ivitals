@@ -682,9 +682,9 @@ a:focus-visible {
 .fleet-row {
   display: grid;
   grid-template-columns:
-    minmax(178px, 1.55fr) minmax(190px, 1.65fr) minmax(94px, 0.82fr)
-    minmax(88px, 0.76fr) minmax(138px, 1.1fr) minmax(94px, 0.82fr)
-    minmax(116px, 0.95fr);
+    minmax(172px, 1.5fr) minmax(186px, 1.6fr) minmax(126px, 1.05fr)
+    minmax(88px, 0.74fr) minmax(142px, 1.16fr) minmax(94px, 0.8fr)
+    minmax(112px, 0.92fr);
   gap: 14px;
   align-items: center;
   justify-content: start;
@@ -913,6 +913,10 @@ a:focus-visible {
   width: 100%;
   height: 26px;
   color: var(--series-cpu);
+}
+
+.sparkline.mem {
+  color: var(--series-mem);
 }
 
 .spark-area {

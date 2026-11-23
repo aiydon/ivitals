@@ -126,6 +126,10 @@ export interface SeriesPoint {
   diskWrite: number | null;
   diskUtil: number | null;
   fsUsedMax: number | null;
+  fsUsedBytes: number | null;
+  fsTotalBytes: number | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
   samples: number;
 }
 

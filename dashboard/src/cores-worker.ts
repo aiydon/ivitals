@@ -221,10 +221,15 @@ async function run(req: CoresRequest): Promise<CoresWorkerResult> {
     );
   }
   const effectiveEnd = Math.min(req.toMs, Date.now());
-  const expected = Math.max(0, Math.ceil((effectiveEnd - req.fromMs) / req.bucketMs));
+  const times = frames.map((frame) => frame.t);
+  const effectiveStart = times.length > 0 ? times[0] : req.fromMs;
+  const expected = Math.max(
+    0,
+    Math.ceil((effectiveEnd - effectiveStart) / req.bucketMs),
+  );
   const coverageInfo = coverage(
-    frames.map((frame) => frame.t),
-    req.fromMs,
+    times,
+    effectiveStart,
     effectiveEnd,
     req.bucketMs,
     expected,
