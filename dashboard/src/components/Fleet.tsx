@@ -98,6 +98,7 @@ function summarize(
   const read = weighted(points, "diskRead");
   const write = weighted(points, "diskWrite");
   const lastPointMs = points.length > 0 ? Math.max(...points.map((p) => p.t)) : null;
+  const effectiveCoverage = samples > 0 ? coverage : null;
   const fsMax = points.reduce<number | null>(
     (max, point) =>
       point.fsUsedMax === null
@@ -123,7 +124,7 @@ function summarize(
     memAvg: mem.avg,
     gpuAvg: gpu.avg,
     ioAvg: io.avg,
-    coverage,
+    coverage: effectiveCoverage,
     samples,
     gaps,
     largestGapSecs,
@@ -220,12 +221,14 @@ export function FleetPanel({
   meta,
   loading,
   reloadToken,
+  onRetry,
   onSelect,
 }: {
   overview: OverviewResponse | null;
   meta: MetaResponse;
   loading: boolean;
   reloadToken: number;
+  onRetry: () => void;
   onSelect: (alias: string) => void;
 }) {
   const [from, setFrom] = useState("");
@@ -308,7 +311,7 @@ export function FleetPanel({
   const totals = useMemo(() => {
     if (!rows) return null;
     const samples = rows.reduce((sum, row) => sum + row.samples, 0);
-    const covered = rows.filter((row) => row.coverage !== null);
+    const covered = rows.filter((row) => row.coverage !== null && row.samples > 0);
     const coverage =
       covered.length > 0
         ? covered.reduce((sum, row) => sum + (row.coverage ?? 0), 0) / covered.length
@@ -373,10 +376,24 @@ export function FleetPanel({
         }}
       />
 
+      <div className="fleet-toolbar">
+        <span className={`scan-state ${scanning ? "busy" : ""}`} aria-live="polite">
+          {scanning ? "正在聚合所选范围…" : rows ? "已聚合" : "等待数据"}
+        </span>
+        {rows && (
+          <span className="muted small mono">
+            {rows.reduce((sum, row) => sum + row.samples, 0).toLocaleString()} samples
+          </span>
+        )}
+      </div>
+
       {error && (
         <div className="notice error">
           <strong>统计失败</strong>
           <p>{error}</p>
+          <button className="ghost" onClick={onRetry}>
+            重试
+          </button>
         </div>
       )}
 
@@ -398,13 +415,13 @@ export function FleetPanel({
           <Kpi
             label="最长缺口"
             value={totals.largestGap > 0 ? formatDuration(totals.largestGap * 1000) : "无"}
-            note={totals.largestGap > 0 ? "采集中断" : "数据连续"}
+            note={totals.largestGap > 0 ? "采样缺口" : "数据连续"}
           />
         </div>
       )}
 
       <div className="fleet-scroll">
-        <div className="fleet fleet-history">
+        <div className={`fleet fleet-history ${scanning ? "is-scanning" : ""}`}>
           <div className="fleet-head" aria-hidden="true">
             <span>主机</span>
             <span>CPU 走势</span>
@@ -485,7 +502,11 @@ export function FleetPanel({
                   {row.coverage === null ? "—" : `${row.coverage.toFixed(1)}%`}
                 </strong>
                 <span className="stat-note mono">
-                  {row.gaps > 0 ? `${row.gaps} 段缺口` : "连续"}
+                  {row.samples === 0
+                    ? "无数据"
+                    : row.gaps > 0
+                      ? `${row.gaps} 段缺口`
+                      : "连续"}
                 </span>
               </span>
 
@@ -499,7 +520,18 @@ export function FleetPanel({
         </div>
       </div>
 
-      {scanning && <p className="fleet-hint muted small">正在聚合所选范围…</p>}
+      {!rows && scanning && (
+        <div className="skeleton-list" aria-hidden="true">
+          {[0, 1, 2].map((index) => (
+            <div className="skeleton-row" key={index}>
+              <span />
+              <span />
+              <span />
+              <span />
+            </div>
+          ))}
+        </div>
+      )}
 
       {copied === "manual" && (
         <div className="notice warn">

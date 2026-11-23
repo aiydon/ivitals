@@ -24,10 +24,12 @@ function buildPresets(dates: string[]): Preset[] {
   const latest = dates[0];
   const take = (count: number) => dates[Math.min(count, dates.length) - 1] ?? latest;
   const presets: Preset[] = [{ key: "1d", label: "最新一天", from: latest, to: latest }];
-  if (dates.length >= 3) {
+  // Only offer a window when it is strictly narrower than "全部"; otherwise
+  // two presets map to the same range and the active state becomes ambiguous.
+  if (dates.length > 3) {
     presets.push({ key: "3d", label: "最新 3 天", from: take(3), to: latest });
   }
-  if (dates.length >= 7) {
+  if (dates.length > 7) {
     presets.push({ key: "7d", label: "最新 7 天", from: take(7), to: latest });
   }
   if (dates.length > 1) {

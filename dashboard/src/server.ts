@@ -615,7 +615,10 @@ function localDatesFromUtc(utcDates: string[], tzOffset: number): string[] {
     out.add(localDateOf(start, tzOffset));
     out.add(localDateOf(start + DAY_MS - 1, tzOffset));
   }
-  return [...out].sort().reverse();
+  // A UTC partition that just started also "touches" tomorrow in local time,
+  // but that day has no data yet; never offer future dates.
+  const today = localDateOf(Date.now(), tzOffset);
+  return [...out].filter((date) => date <= today).sort().reverse();
 }
 
 function localDays(from: string, to: string): string[] {
