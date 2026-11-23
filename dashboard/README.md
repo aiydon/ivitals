@@ -28,13 +28,18 @@
 make install   # cd dashboard && bun install
 make dev       # http://<LAN-IP>:8899（默认绑定 0.0.0.0）
 make build     # dashboard/dist（生产静态文件）
-make start     # 生产模式，读取 dashboard/dist
+make start     # 生产模式，读取 dashboard/dist（前台）
+make start-bg  # 生产模式，后台常驻并写 dashboard/ivitals.log / ivitals.pid
+make stop      # 停止 start-bg 启动的进程
 make clean     # 仅删除 dashboard/dist，不触碰 ../data
 ```
 
 开发模式使用 Bun 的 HTML import 自动打包；生产模式由 `src/server.ts` 直接托管
 `dashboard/dist`。端口/监听地址可用 `PORT`、`HOST` 覆盖；默认 `0.0.0.0:8899`，
 启动日志会打印所有内网地址。
+
+长时间运行时用 `make start-bg`：进程以 `setsid nohup` 脱离终端，关闭 SSH 或终端不会退出；
+日志在 `dashboard/ivitals.log`。看板掉线后前端会显示“服务未连接”，每 5 秒自动重试。
 
 **安全**：看板没有鉴权，会暴露主机名、进程命令行和路径。只在可信内网使用，
 或放到带鉴权的反向代理后面；`data/` 的读权限也应限制在同样范围。
@@ -86,6 +91,7 @@ alias 也会列出（标记为 `unknown`），并在 UI 顶部提示。
 
 - 当前仓库数据为 schema v2，服务器 `sustech` / `sinotruk` / `local` / `valadu` /
   `frp`；看板完全由配置与目录发现，不写死 alias 或日期。
+- 可选的本地日期最多到今天，不会出现“明天”这种必然为空的日期。
 - 日期目录是 UTC，但看板选择的是**本地日历日**：本地一天会读取相邻两个 UTC 分区，
   并由服务端按时间戳过滤；进程快照会在这些分区里找该本地日最后一个快照。
 - 如果某个服务器/日期没有文件，总览显示“无数据”，时序与进程面板给出可读错误，
