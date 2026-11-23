@@ -94,29 +94,42 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let stopped = false;
     const controller = new AbortController();
-    api
-      .meta(controller.signal)
-      .then((next) => {
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    const load = async () => {
+      try {
+        const next = await api.meta(controller.signal);
+        if (stopped) return;
         setMeta(next);
         setMetaError(null);
-      })
-      .catch((error) => {
-        if (!controller.signal.aborted) setMetaError(errorText(error));
-      });
-    return () => controller.abort();
+      } catch (error) {
+        if (stopped || controller.signal.aborted) return;
+        setMetaError(errorText(error));
+        retry = setTimeout(load, 5000);
+      }
+    };
+    void load();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (retry) clearTimeout(retry);
+    };
   }, []);
 
   useEffect(() => {
     if (!meta) return;
     const controller = new AbortController();
+    let retry: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
       try {
         const next = await api.overview(controller.signal);
         setOverview(next);
         setOverviewError(null);
       } catch (error) {
-        if (!controller.signal.aborted) setOverviewError(errorText(error));
+        if (controller.signal.aborted) return;
+        setOverviewError(errorText(error));
+        retry = setTimeout(load, 5000);
       }
     };
     void load();
@@ -124,6 +137,7 @@ export function App() {
     return () => {
       controller.abort();
       clearInterval(timer);
+      if (retry) clearTimeout(retry);
     };
   }, [meta, nonce]);
 
@@ -359,10 +373,14 @@ export function App() {
           </div>
         )}
 
-        {overviewError && (
+        {(metaError || overviewError) && (
           <div className="notice error">
-            <strong>主机数据读取失败</strong>
-            <p>{overviewError}</p>
+            <strong>看板服务未连接或读取失败</strong>
+            <p>{metaError ?? overviewError}</p>
+            <p className="muted small">每 5 秒自动重试；也可以手动刷新。</p>
+            <button className="ghost" onClick={refresh} disabled={busy}>
+              立即重试
+            </button>
           </div>
         )}
 
@@ -372,6 +390,7 @@ export function App() {
             meta={meta}
             loading={!overview && !overviewError}
             reloadToken={nonce}
+            onRetry={refresh}
             onSelect={(alias) => openHost(alias, "overview")}
           />
         )}

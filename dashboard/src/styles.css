@@ -941,6 +941,80 @@ a:focus-visible {
   margin-top: 10px;
 }
 
+.fleet-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 18px;
+  margin: 2px 0 8px;
+}
+
+.scan-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.scan-state.busy {
+  color: var(--accent);
+}
+
+.scan-state.busy::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.is-scanning .fleet-row {
+  opacity: 0.55;
+}
+
+.skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 0;
+}
+
+.skeleton-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.skeleton-row span {
+  height: 12px;
+  border-radius: 6px;
+  background: var(--raised-2);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.skeleton-row span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.skeleton-row span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
 .summary-text {
   max-height: 220px;
   margin: 8px 0 0;

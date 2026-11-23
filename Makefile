@@ -5,7 +5,7 @@
 
 DASHBOARD := dashboard
 
-.PHONY: install dev build start clean
+.PHONY: install dev build start start-bg stop clean
 
 install:
 	cd $(DASHBOARD) && bun install
@@ -18,6 +18,21 @@ build: clean
 
 start:
 	cd $(DASHBOARD) && bun run start
+
+# Detached production server that survives the launching terminal.
+start-bg: build
+	@cd $(DASHBOARD) && setsid nohup bun src/server.ts > ivitals.log 2>&1 & echo $$! > $(DASHBOARD)/ivitals.pid
+	@sleep 1
+	@echo "dashboard started (pid $$(cat $(DASHBOARD)/ivitals.pid)); log: $(DASHBOARD)/ivitals.log"
+
+stop:
+	@if [ -f $(DASHBOARD)/ivitals.pid ]; then \
+		kill $$(cat $(DASHBOARD)/ivitals.pid) 2>/dev/null || true; \
+		rm -f $(DASHBOARD)/ivitals.pid; \
+		echo "dashboard stopped"; \
+	else \
+		echo "no pidfile; use: pkill -f 'bun src/server.ts'"; \
+	fi
 
 clean:
 	@echo "removing dashboard build artifacts only (data/ is untouched)"
