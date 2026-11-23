@@ -294,6 +294,7 @@ See `dashboard/README.md` for the API, environment overrides
 
 ```bash
 make collector-start   # detached collector; log: ivitals.log, pid: ivitals.pid
+                       # run exactly ONE collector per data directory
 make collector-stop
 make start-bg          # detached dashboard on 0.0.0.0:8899
 make stop
@@ -301,6 +302,11 @@ make stop
 
 Both run outside the terminal (`setsid nohup`), so closing SSH does not stop
 monitoring. The dashboard reconnects automatically after a restart.
+
+Each host runs in its own tick task, so a slow SSH host only delays itself
+(`MissedTickBehavior::Skip` drops its own backlog). Blocking threads are sized
+from the server count (64–1024), keeping a large fleet away from the default
+512-thread cap; the main loop only waits on signals and writer health.
 
 ## Testing
 
