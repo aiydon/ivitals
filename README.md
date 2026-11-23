@@ -304,9 +304,10 @@ Both run outside the terminal (`setsid nohup`), so closing SSH does not stop
 monitoring. The dashboard reconnects automatically after a restart.
 
 Each host runs in its own tick task, so a slow SSH host only delays itself
-(`MissedTickBehavior::Skip` drops its own backlog). Blocking threads are sized
-from the server count (64–1024), keeping a large fleet away from the default
-512-thread cap; the main loop only waits on signals and writer health.
+(`MissedTickBehavior::Skip` drops its own backlog). The SSH session is reused
+per host and reconnected only after a failure, and every remote command is
+bounded by `timeout`; blocking threads are sized from the server count
+(64–1024). The main loop only waits on signals and writer health.
 
 ## Testing
 
