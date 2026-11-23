@@ -357,7 +357,7 @@ function GpuChart({ data }: { data: SeriesResponse }) {
       chart.current.clear();
       return;
     }
-    chart.current.setOption(gpuChartOption(data, theme), { notMerge: true });
+    chart.current.setOption(gpuChartOption(data, theme), { lazyUpdate: true });
   }, [data, theme, hasData]);
 
   if (!hasData) return null;
@@ -470,7 +470,7 @@ function GpuHeatmap({ tracks, times }: { tracks: GpuTrack[]; times: number[] }) 
       chart.current.clear();
       return;
     }
-    chart.current.setOption(gpuHeatmapOption(tracks, times, theme), { notMerge: true });
+    chart.current.setOption(gpuHeatmapOption(tracks, times, theme), { lazyUpdate: true });
   }, [tracks, times, theme, enabled]);
 
   if (!enabled) return null;
@@ -609,7 +609,7 @@ function MemoryChart({ data }: { data: SeriesResponse }) {
       chart.current.clear();
       return;
     }
-    chart.current.setOption(memoryChartOption(data, theme), { notMerge: true });
+    chart.current.setOption(memoryChartOption(data, theme), { lazyUpdate: true });
   }, [data, theme, enabled]);
 
   if (!enabled) return null;
@@ -752,7 +752,7 @@ function DiskChart({ data }: { data: SeriesResponse }) {
       chart.current.clear();
       return;
     }
-    chart.current.setOption(diskChartOption(data, theme), { notMerge: true });
+    chart.current.setOption(diskChartOption(data, theme), { lazyUpdate: true });
   }, [data, theme, hasData]);
 
   if (!hasData) return null;
@@ -763,58 +763,6 @@ function DiskChart({ data }: { data: SeriesResponse }) {
         <div className="chart disk-chart" ref={host} role="img" aria-label="磁盘吞吐与使用率图" />
       </div>
     </>
-  );
-}
-
-function GpuCards({ gpus }: { gpus: SeriesResponse["latestGpus"] }) {
-  if (gpus.length === 0) return null;
-  return (
-    <div className="gpu-cards">
-      {gpus.map((gpu) => (
-        <div className="gpu-card" key={gpu.index}>
-          <div className="gpu-card-head">
-            <strong>GPU {gpu.index}</strong>
-            <span className="muted small">{gpu.name}</span>
-          </div>
-          <div className="gpu-card-grid">
-            <div>
-              <span className="label">util</span>
-              <strong>{formatPercent(gpu.utilPercent)}</strong>
-            </div>
-            <div>
-              <span className="label">显存</span>
-              <strong>{formatPercent(gpu.memUtilPercent)}</strong>
-              <span className="muted tiny">
-                {gpu.memUsedMb.toLocaleString()} / {gpu.memTotalMb.toLocaleString()} MiB
-              </span>
-            </div>
-            <div>
-              <span className="label">温度</span>
-              <strong>{gpu.tempC.toFixed(1)} °C</strong>
-            </div>
-            <div>
-              <span className="label">功耗</span>
-              <strong>{gpu.powerW === null ? "—" : `${gpu.powerW.toFixed(0)} W`}</strong>
-              <span className="muted tiny">
-                {gpu.powerLimitW === null ? "" : ` / ${gpu.powerLimitW.toFixed(0)} W`}
-              </span>
-            </div>
-            <div>
-              <span className="label">SM / MEM</span>
-              <strong className="small-strong">
-                {gpu.smClockMhz ?? "—"} / {gpu.memClockMhz ?? "—"} MHz
-              </strong>
-            </div>
-            <div>
-              <span className="label">风扇 / Pstate</span>
-              <strong className="small-strong">
-                {gpu.fanPercent === null ? "—" : `${gpu.fanPercent}%`} / {gpu.pstate ?? "—"}
-              </strong>
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
   );
 }
 
@@ -855,11 +803,14 @@ function SeriesChart({ data }: { data: SeriesResponse | null }) {
 
   return (
     <div className="chart-wrap">
-      <div className="chart" ref={host} role="img" aria-label="CPU、内存与 iowait 时间序列图" />
+      <div
+        className="chart"
+        ref={host}
+        role="img"
+        aria-label="CPU、内存与 iowait 时间序列图"
+      />
       {data && data.points.length === 0 && (
-        <div className="chart-empty empty-state">
-          所选范围内没有可绘制的 metrics 记录。请更换服务器或日期。
-        </div>
+        <div className="chart-empty empty-state">所选范围没有可绘制的数据</div>
       )}
     </div>
   );
@@ -881,6 +832,8 @@ export function SeriesPanel({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [nonce, setNonce] = useState(0);
+  const [tab, setTab] = useState<"mem" | "disk" | "gpuMem" | "gpuTemp">("mem");
+  const queryRef = useRef("");
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
@@ -893,7 +846,11 @@ export function SeriesPanel({
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    setData(null);
+    const queryKey = `${server}|${from}|${to}|${maxPoints}`;
+    if (queryRef.current !== queryKey) {
+      queryRef.current = queryKey;
+      setData(null);
+    }
     api
       .series({ server, from, to, maxPoints }, controller.signal)
       .then((result) => setData(result))
@@ -909,6 +866,27 @@ export function SeriesPanel({
   }, [server, from, to, maxPoints, nonce, refreshTick]);
 
   const gaps = data ? internalGaps(data) : [];
+  const points = data?.points ?? [];
+  const tabs = [
+    { key: "mem" as const, label: "内存", enabled: points.some((p) => p.memUsedBytes !== null) },
+    { key: "disk" as const, label: "磁盘", enabled: points.some((p) => p.diskRead !== null) },
+    {
+      key: "gpuMem" as const,
+      label: "GPU 显存",
+      enabled: (data?.gpuTracks?.length ?? 0) > 0,
+    },
+    {
+      key: "gpuTemp" as const,
+      label: "GPU 温度 / 功耗",
+      enabled: points.some((p) => p.gpuTemp !== null),
+    },
+  ].filter((item) => item.enabled);
+
+  useEffect(() => {
+    if (tabs.length > 0 && !tabs.some((item) => item.key === tab)) {
+      setTab(tabs[0].key);
+    }
+  }, [tabs, tab]);
 
   return (
     <section className="panel">
@@ -1022,16 +1000,31 @@ export function SeriesPanel({
       )}
 
       <SeriesChart data={data} />
-      {data && <GpuCards gpus={data.latestGpus} />}
-      {data && (
+      {data && tabs.length > 0 && (
+        <div className="chart-tabs" role="tablist" aria-label="详细图表">
+          {tabs.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              role="tab"
+              className={`chart-tab ${tab === item.key ? "active" : ""}`}
+              aria-selected={tab === item.key}
+              onClick={() => setTab(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {data && tab === "mem" && <MemoryChart data={data} />}
+      {data && tab === "disk" && <DiskChart data={data} />}
+      {data && tab === "gpuMem" && (
         <GpuHeatmap
-          tracks={data.gpuTracks}
+          tracks={data.gpuTracks ?? []}
           times={data.points.map((point) => point.t)}
         />
       )}
-      {data && <GpuChart data={data} />}
-      {data && <MemoryChart data={data} />}
-      {data && <DiskChart data={data} />}
+      {data && tab === "gpuTemp" && <GpuChart data={data} />}
     </section>
   );
 }

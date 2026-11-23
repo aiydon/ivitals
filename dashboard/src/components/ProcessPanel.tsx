@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 import { api } from "../api";
 import { DayPicker } from "./DateRangeBar";
@@ -37,6 +37,7 @@ export function ProcessPanel({
   const [top, setTop] = useState("20");
   const [data, setData] = useState<ProcessesResponse | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const queryRef = useRef("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [nonce, setNonce] = useState(0);
@@ -53,7 +54,11 @@ export function ProcessPanel({
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    setData(null);
+    const queryKey = `${server}|${date}`;
+    if (queryRef.current !== queryKey) {
+      queryRef.current = queryKey;
+      setData(null);
+    }
     api
       .processes({ server, date, top }, controller.signal)
       .then((result) => setData(result))

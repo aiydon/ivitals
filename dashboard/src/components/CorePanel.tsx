@@ -132,7 +132,7 @@ function CoreHeatmap({ data }: { data: CoresResponse | null }) {
       chart.current.clear();
       return;
     }
-    chart.current.setOption(option, { notMerge: true });
+    chart.current.setOption(option, { lazyUpdate: true });
   }, [option]);
 
   return (
@@ -168,6 +168,7 @@ export function CorePanel({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [nonce, setNonce] = useState(0);
+  const queryRef = useRef("");
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
@@ -180,7 +181,11 @@ export function CorePanel({
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    setData(null);
+    const queryKey = `${server}|${from}|${to}|${maxFrames}`;
+    if (queryRef.current !== queryKey) {
+      queryRef.current = queryKey;
+      setData(null);
+    }
     api
       .cores({ server, from, to, maxFrames }, controller.signal)
       .then((result) => setData(result))
