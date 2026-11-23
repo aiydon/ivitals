@@ -13,8 +13,7 @@ use ivitals::config::{Config, Mode};
 use ivitals::model::Record;
 use ivitals::scheduler::Scheduler;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cfg = Config::load()?;
     init_logger(&cfg.global.log_level);
     log::info!(
@@ -30,6 +29,20 @@ async fn main() -> anyhow::Result<()> {
         cfg.global.data_dir,
     );
 
+    // One slow SSH host must not starve the others: every host runs its own
+    // task on the blocking pool, so size that pool with headroom for the
+    // configured fleet instead of relying on the default 512 thread cap.
+    let blocking_threads = (cfg.servers.len() * 2 + 32).clamp(64, 1024);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(blocking_threads)
+        .enable_all()
+        .build()?;
+    log::info!("runtime: 2 async workers, {blocking_threads} blocking threads");
+    runtime.block_on(run(cfg))
+}
+
+async fn run(cfg: Config) -> anyhow::Result<()> {
     // Storage channel + single writer thread: appends JSONL under
     // data/{YYYY-MM-DD}/{alias}-{kind}.jsonl, flushes on 30s/200-record
     // cadence and on channel close (Ctrl-C).
