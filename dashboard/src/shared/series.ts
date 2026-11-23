@@ -1,4 +1,4 @@
-import type { DataGap, GpuInfo, SeriesPoint } from "./types";
+import type { DataGap, GpuInfo, GpuTrack, SeriesPoint } from "./types";
 
 export interface SeriesFile {
   date: string;
@@ -25,6 +25,7 @@ export interface SeriesWorkerResult {
   warnings: string[];
   gpuCount: number;
   latestGpus: GpuInfo[];
+  gpuTracks: GpuTrack[];
   expectedBuckets: number;
   coveredBuckets: number;
   coveragePercent: number;

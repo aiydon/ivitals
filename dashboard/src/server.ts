@@ -701,6 +701,7 @@ async function buildSeries(url: URL): Promise<SeriesResponse> {
     warnings: result.warnings,
     gpuCount: result.gpuCount,
     latestGpus: result.latestGpus,
+    gpuTracks: result.gpuTracks,
     expectedBuckets: result.expectedBuckets,
     coveredBuckets: result.coveredBuckets,
     coveragePercent: result.coveragePercent,

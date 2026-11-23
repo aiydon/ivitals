@@ -8,7 +8,7 @@ import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { parentPort } from "node:worker_threads";
 
-import type { DataGap, GpuInfo, SeriesPoint } from "./shared/types";
+import type { DataGap, GpuInfo, GpuTrack, SeriesPoint } from "./shared/types";
 import type {
   SeriesRequest,
   SeriesWorkerMessage,
@@ -49,6 +49,10 @@ interface Bucket {
   fsTotalBytes: number | null;
   memUsedBytes: number | null;
   memTotalBytes: number | null;
+  memCacheBytes: number | null;
+  memSwapBytes: number | null;
+  gpuTrackSum: number[];
+  gpuTrackN: number[];
 }
 
 interface ScanMeta {
@@ -231,6 +235,10 @@ async function scanFile(
           fsTotalBytes: null,
           memUsedBytes: null,
           memTotalBytes: null,
+          memCacheBytes: null,
+          memSwapBytes: null,
+          gpuTrackSum: [],
+          gpuTrackN: [],
         };
         buckets.set(idx, b);
       }
@@ -248,6 +256,11 @@ async function scanFile(
       }
       if (used !== null) b.memUsedBytes = used;
       if (total !== null) b.memTotalBytes = total;
+      const memDetail = (obj.memory_detail ?? {}) as Record<string, unknown>;
+      const cache = num(memDetail.cache_bytes);
+      const swap = num(memDetail.swap_used_bytes);
+      if (cache !== null) b.memCacheBytes = cache;
+      if (swap !== null) b.memSwapBytes = swap;
       if (iowait !== null) {
         b.ioSum += iowait;
         b.ioN += 1;
@@ -264,6 +277,15 @@ async function scanFile(
       if (gpuMem !== null) {
         b.gpuMemSum += gpuMem;
         b.gpuMemN += 1;
+      }
+      for (const gpu of gpus) {
+        if (gpu.memUtilPercent === null) continue;
+        while (b.gpuTrackSum.length <= gpu.index) {
+          b.gpuTrackSum.push(0);
+          b.gpuTrackN.push(0);
+        }
+        b.gpuTrackSum[gpu.index] += gpu.memUtilPercent;
+        b.gpuTrackN[gpu.index] += 1;
       }
       if (gpuTemp !== null) {
         b.gpuTempMax = b.gpuTempMax === null ? gpuTemp : Math.max(b.gpuTempMax, gpuTemp);
@@ -332,6 +354,33 @@ async function scanFile(
     stream.destroy();
   }
   return lines > req.maxLines;
+}
+
+function buildGpuTracks(
+  points: SeriesPoint[],
+  buckets: Map<number, Bucket>,
+): GpuTrack[] {
+  let maxIndex = -1;
+  for (const bucket of buckets.values()) {
+    maxIndex = Math.max(maxIndex, bucket.gpuTrackSum.length - 1);
+  }
+  if (maxIndex < 0) return [];
+  const tracks: GpuTrack[] = [];
+  for (let index = 0; index <= maxIndex; index++) {
+    tracks.push({ index, name: `GPU ${index}`, values: [] });
+  }
+  const ordered = [...buckets.entries()].sort((a, b) => a[0] - b[0]);
+  for (const [, bucket] of ordered) {
+    for (const track of tracks) {
+      const n = bucket.gpuTrackN[track.index] ?? 0;
+      track.values.push(
+        n > 0 ? round(bucket.gpuTrackSum[track.index] / n) : null,
+      );
+    }
+  }
+  // Trim values to the same points array length (defensive).
+  for (const track of tracks) track.values.length = points.length;
+  return tracks;
 }
 
 function coverage(
@@ -443,6 +492,8 @@ async function run(req: SeriesRequest): Promise<SeriesWorkerResult> {
       fsTotalBytes: b.fsTotalBytes,
       memUsedBytes: b.memUsedBytes,
       memTotalBytes: b.memTotalBytes,
+      memCacheBytes: b.memCacheBytes,
+      memSwapBytes: b.memSwapBytes,
       samples: b.samples,
     });
   }
@@ -476,6 +527,7 @@ async function run(req: SeriesRequest): Promise<SeriesWorkerResult> {
     warnings: counters.scanErrors.slice(0, 5),
     gpuCount: meta.gpuCount,
     latestGpus: meta.latestGpus,
+    gpuTracks: buildGpuTracks(filtered, buckets),
     ...coverageInfo,
   };
 }

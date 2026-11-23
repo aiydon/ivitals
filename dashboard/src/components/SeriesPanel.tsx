@@ -1,26 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { LineChart } from "echarts/charts";
+import { HeatmapChart, LineChart } from "echarts/charts";
 import {
   DataZoomComponent,
   GridComponent,
   LegendComponent,
   TooltipComponent,
+  VisualMapComponent,
 } from "echarts/components";
 import * as echarts from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
 
 import { api } from "../api";
 import { DateRangeBar } from "./DateRangeBar";
-import { formatBytes, formatDateTime, formatDuration, formatPercent } from "../format";
+import {
+  formatBytes,
+  formatBytesCompact,
+  formatDateTime,
+  formatDuration,
+  formatPercent,
+  formatTime,
+} from "../format";
 import { chartTheme, useTheme } from "../theme";
-import type { MetaResponse, SeriesResponse } from "../shared/types";
+import type { GpuTrack, MetaResponse, SeriesResponse } from "../shared/types";
 
 echarts.use([
   LineChart,
+  HeatmapChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
   DataZoomComponent,
+  VisualMapComponent,
   CanvasRenderer,
 ]);
 
@@ -38,15 +48,15 @@ type NumericField =
   | "diskWrite"
   | "fsUsedMax";
 
-function gapAware(
+function gapSeries(
   data: SeriesResponse,
-  field: NumericField,
+  getter: (point: SeriesResponse["points"][number]) => number | null,
 ): Array<[number, number | null]> {
   const bucketMs = data.bucketSecs * 1000;
   const out: Array<[number, number | null]> = [];
   let previous: number | null = null;
   for (const point of data.points) {
-    const value = point[field];
+    const value = getter(point);
     if (previous !== null && point.t - previous > bucketMs * 1.8) {
       out.push([previous + bucketMs, null]);
     }
@@ -54,6 +64,13 @@ function gapAware(
     previous = point.t;
   }
   return out;
+}
+
+function gapAware(
+  data: SeriesResponse,
+  field: NumericField,
+): Array<[number, number | null]> {
+  return gapSeries(data, (point) => point[field]);
 }
 
 function internalGaps(data: SeriesResponse) {
@@ -345,9 +362,269 @@ function GpuChart({ data }: { data: SeriesResponse }) {
 
   if (!hasData) return null;
   return (
-    <div className="chart-wrap gpu-chart-wrap">
-      <div className="chart gpu-chart" ref={host} role="img" aria-label="GPU 温度与功耗图" />
-    </div>
+    <>
+      <div className="chart-caption">GPU 温度 / 功耗</div>
+      <div className="chart-wrap gpu-chart-wrap">
+        <div className="chart gpu-chart" ref={host} role="img" aria-label="GPU 温度与功耗图" />
+      </div>
+    </>
+  );
+}
+
+function gpuHeatmapOption(
+  tracks: GpuTrack[],
+  times: number[],
+  theme: "dark" | "light",
+): Record<string, unknown> {
+  const c = chartTheme(theme);
+  const labels = times.map((time) => formatTime(time));
+  const points: [number, number, number][] = [];
+  tracks.forEach((track, y) => {
+    track.values.forEach((value, x) => {
+      if (value !== null) points.push([x, y, value]);
+    });
+  });
+  return {
+    animation: false,
+    backgroundColor: "transparent",
+    textStyle: { color: c.fg, fontFamily: "IBM Plex Sans" },
+    grid: { left: 64, right: 18, top: 44, bottom: 34 },
+    tooltip: {
+      backgroundColor: c.tooltipBg,
+      borderColor: c.tooltipBorder,
+      textStyle: { color: c.fg, fontSize: 12 },
+      formatter: (params: { value: [number, number, number] }) => {
+        const [x, y, value] = params.value;
+        return `${tracks[y]?.name ?? `GPU ${y}`}<br/>${labels[x] ?? ""}<br/><b>显存 ${value.toFixed(1)}%</b>`;
+      },
+    },
+    visualMap: {
+      type: "piecewise",
+      orient: "horizontal",
+      left: "center",
+      top: 4,
+      itemWidth: 13,
+      itemHeight: 11,
+      itemGap: 10,
+      textStyle: { color: c.muted, fontSize: 10 },
+      pieces: [
+        { min: 0, max: 5, label: "0–5", color: c.heatmap[0] },
+        { min: 5, max: 15, label: "5–15", color: c.heatmap[1] },
+        { min: 15, max: 35, label: "15–35", color: c.heatmap[2] },
+        { min: 35, max: 60, label: "35–60", color: c.heatmap[3] },
+        { min: 60, max: 85, label: "60–85", color: c.heatmap[4] },
+        { min: 85, max: 100, label: "85–100", color: c.heatmap[5] },
+      ],
+    },
+    xAxis: {
+      type: "category",
+      data: labels,
+      axisLabel: { color: c.muted, hideOverlap: true, fontFamily: "IBM Plex Mono" },
+      axisLine: { lineStyle: { color: c.border } },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "category",
+      inverse: true,
+      data: tracks.map((track) => track.name),
+      axisLabel: { color: c.muted, fontFamily: "IBM Plex Mono" },
+      axisLine: { lineStyle: { color: c.border } },
+      splitLine: { show: false },
+    },
+    series: [
+      {
+        type: "heatmap",
+        data: points,
+        itemStyle: {
+          borderColor: theme === "light" ? "rgba(21,23,26,0.1)" : "rgba(11,12,14,0.42)",
+          borderWidth: 0.5,
+        },
+        progressive: 4000,
+      },
+    ],
+  };
+}
+
+function GpuHeatmap({ tracks, times }: { tracks: GpuTrack[]; times: number[] }) {
+  const host = useRef<HTMLDivElement | null>(null);
+  const chart = useRef<echarts.EChartsType | null>(null);
+  const { theme } = useTheme();
+  const enabled = (tracks?.length ?? 0) > 0 && times.length > 0;
+
+  useEffect(() => {
+    if (!host.current) return;
+    const instance = echarts.init(host.current, undefined, { renderer: "canvas" });
+    chart.current = instance;
+    const observer = new ResizeObserver(() => instance.resize());
+    observer.observe(host.current);
+    return () => {
+      observer.disconnect();
+      instance.dispose();
+      chart.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chart.current) return;
+    if (!enabled) {
+      chart.current.clear();
+      return;
+    }
+    chart.current.setOption(gpuHeatmapOption(tracks, times, theme), { notMerge: true });
+  }, [tracks, times, theme, enabled]);
+
+  if (!enabled) return null;
+  return (
+    <>
+      <div className="chart-caption">GPU 显存</div>
+      <div className="chart-wrap gpu-chart-wrap">
+        <div
+          className="chart gpu-heatmap"
+        ref={host}
+        style={{ height: `${70 + tracks.length * 26}px` }}
+          role="img"
+          aria-label="GPU 显存利用率热力图"
+        />
+      </div>
+    </>
+  );
+}
+
+function memoryChartOption(
+  data: SeriesResponse,
+  theme: "dark" | "light",
+): Record<string, unknown> {
+  const c = chartTheme(theme);
+  return {
+    animation: false,
+    backgroundColor: "transparent",
+    textStyle: { color: c.fg, fontFamily: "IBM Plex Sans" },
+    grid: { left: 64, right: 20, top: 32, bottom: 36 },
+    legend: {
+      type: "scroll",
+      top: 0,
+      textStyle: { color: c.muted, fontFamily: "IBM Plex Sans" },
+      icon: "roundRect",
+      itemWidth: 14,
+      pageTextStyle: { color: c.muted },
+    },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: c.tooltipBg,
+      borderColor: c.tooltipBorder,
+      textStyle: { color: c.fg, fontSize: 12 },
+      formatter: (params: Array<{ dataIndex: number }>) => {
+        const point = data.points[params[0]?.dataIndex ?? 0];
+        if (!point) return "";
+        const used = point.memUsedBytes;
+        const cache = point.memCacheBytes;
+        const apps = used !== null && cache !== null ? Math.max(0, used - cache) : null;
+        return [
+          `<div class="tt-time">${formatDateTime(point.t)}</div>`,
+          `<div class="tt-row"><span>应用</span><b>${formatBytes(apps)}</b></div>`,
+          `<div class="tt-row"><span>缓存</span><b>${formatBytes(cache)}</b></div>`,
+          `<div class="tt-row"><span>Swap</span><b>${formatBytes(point.memSwapBytes)}</b></div>`,
+          `<div class="tt-row"><span>总内存</span><b>${formatBytes(point.memTotalBytes)}</b></div>`,
+        ].join("");
+      },
+    },
+    xAxis: {
+      type: "time",
+      axisLabel: { color: c.muted, hideOverlap: true, fontFamily: "IBM Plex Mono" },
+      axisLine: { lineStyle: { color: c.border } },
+      splitLine: { show: false },
+    },
+    yAxis: {
+      type: "value",
+      min: 0,
+      axisLabel: {
+        color: c.muted,
+        fontFamily: "IBM Plex Mono",
+        formatter: (value: number) => formatBytesCompact(value),
+      },
+      splitLine: { lineStyle: { color: c.border, type: "dashed" } },
+    },
+    series: [
+      {
+        name: "应用",
+        type: "line",
+        stack: "mem",
+        showSymbol: false,
+        areaStyle: { opacity: 0.28 },
+        lineStyle: { width: 1 },
+        itemStyle: { color: c.cpu },
+        connectNulls: false,
+        data: gapSeries(data, (point) =>
+          point.memUsedBytes !== null && point.memCacheBytes !== null
+            ? Math.max(0, point.memUsedBytes - point.memCacheBytes)
+            : null,
+        ),
+      },
+      {
+        name: "缓存",
+        type: "line",
+        stack: "mem",
+        showSymbol: false,
+        areaStyle: { opacity: 0.28 },
+        lineStyle: { width: 1 },
+        itemStyle: { color: c.mem },
+        connectNulls: false,
+        data: gapSeries(data, (point) => point.memCacheBytes),
+      },
+      {
+        name: "Swap",
+        type: "line",
+        showSymbol: false,
+        lineStyle: { width: 1.2, color: c.warn, type: "dashed" },
+        itemStyle: { color: c.warn },
+        connectNulls: false,
+        data: gapSeries(data, (point) => point.memSwapBytes),
+      },
+    ],
+  };
+}
+
+function MemoryChart({ data }: { data: SeriesResponse }) {
+  const host = useRef<HTMLDivElement | null>(null);
+  const chart = useRef<echarts.EChartsType | null>(null);
+  const { theme } = useTheme();
+  const enabled = data.points.some((point) => point.memUsedBytes !== null);
+
+  useEffect(() => {
+    if (!host.current) return;
+    const instance = echarts.init(host.current, undefined, { renderer: "canvas" });
+    chart.current = instance;
+    const observer = new ResizeObserver(() => instance.resize());
+    observer.observe(host.current);
+    return () => {
+      observer.disconnect();
+      instance.dispose();
+      chart.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chart.current) return;
+    if (!enabled) {
+      chart.current.clear();
+      return;
+    }
+    chart.current.setOption(memoryChartOption(data, theme), { notMerge: true });
+  }, [data, theme, enabled]);
+
+  if (!enabled) return null;
+  return (
+    <>
+      <div className="chart-caption">内存构成</div>
+      <div className="chart-wrap gpu-chart-wrap">
+        <div
+          className="chart mem-chart"
+        ref={host}
+          role="img"
+          aria-label="内存构成图"
+        />
+      </div>
+    </>
   );
 }
 
@@ -480,9 +757,12 @@ function DiskChart({ data }: { data: SeriesResponse }) {
 
   if (!hasData) return null;
   return (
-    <div className="chart-wrap gpu-chart-wrap">
-      <div className="chart disk-chart" ref={host} role="img" aria-label="磁盘吞吐与使用率图" />
-    </div>
+    <>
+      <div className="chart-caption">磁盘吞吐 / 使用率</div>
+      <div className="chart-wrap gpu-chart-wrap">
+        <div className="chart disk-chart" ref={host} role="img" aria-label="磁盘吞吐与使用率图" />
+      </div>
+    </>
   );
 }
 
@@ -743,7 +1023,14 @@ export function SeriesPanel({
 
       <SeriesChart data={data} />
       {data && <GpuCards gpus={data.latestGpus} />}
+      {data && (
+        <GpuHeatmap
+          tracks={data.gpuTracks}
+          times={data.points.map((point) => point.t)}
+        />
+      )}
       {data && <GpuChart data={data} />}
+      {data && <MemoryChart data={data} />}
       {data && <DiskChart data={data} />}
     </section>
   );

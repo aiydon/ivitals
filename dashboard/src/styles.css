@@ -1254,6 +1254,16 @@ a:focus-visible {
   height: 210px;
 }
 
+.mem-chart {
+  height: 220px;
+}
+
+.chart-caption {
+  margin: 16px 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .chart.heatmap {
   height: 380px;
 }

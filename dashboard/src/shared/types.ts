@@ -130,7 +130,16 @@ export interface SeriesPoint {
   fsTotalBytes: number | null;
   memUsedBytes: number | null;
   memTotalBytes: number | null;
+  memCacheBytes: number | null;
+  memSwapBytes: number | null;
   samples: number;
+}
+
+export interface GpuTrack {
+  index: number;
+  name: string;
+  /** VRAM utilization per SeriesPoint bucket, aligned with points[]. */
+  values: (number | null)[];
 }
 
 export interface SeriesResponse {
@@ -147,6 +156,7 @@ export interface SeriesResponse {
   warnings: string[];
   gpuCount: number;
   latestGpus: GpuInfo[];
+  gpuTracks: GpuTrack[];
   expectedBuckets: number;
   coveredBuckets: number;
   coveragePercent: number;
