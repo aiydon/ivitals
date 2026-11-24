@@ -282,34 +282,28 @@ export function FleetPanel({
   const [copied, setCopied] = useState<"idle" | "ok" | "manual">("idle");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "online" | "issues">("all");
-  const [autoTick, setAutoTick] = useState(0);
-  const scanningRef = useRef(false);
   const rangeKeyRef = useRef("");
+  const latestRef = useRef("");
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
-    setFrom((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
-    setTo((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
+    const previousLatest = latestRef.current;
+    latestRef.current = latest;
+    const advance = (current: string) => {
+      if (!current) return latest;
+      if (current === previousLatest && latest !== previousLatest) return latest;
+      return meta.dates.includes(current) ? current : latest;
+    };
+    setFrom(advance);
+    setTo(advance);
   }, [meta]);
 
   const servers = overview?.servers ?? [];
   const serverKey = servers.map((server) => server.alias).join(",");
 
-  // Historical analysis still needs to stay current: refresh once a minute,
-  // but never start a second scan while the previous one is running.
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (!scanningRef.current && document.visibilityState === "visible") {
-        setAutoTick((value) => value + 1);
-      }
-    }, 60_000);
-    return () => clearInterval(timer);
-  }, []);
-
   useEffect(() => {
     if (!from || !to || servers.length === 0) return;
     const controller = new AbortController();
-    scanningRef.current = true;
     setScanning(true);
     setError(null);
     const SCAN_CONCURRENCY = 4;
@@ -388,15 +382,11 @@ export function FleetPanel({
         }
       })
       .finally(() => {
-        scanningRef.current = false;
         if (!controller.signal.aborted) setScanning(false);
       });
-    return () => {
-      controller.abort();
-      scanningRef.current = false;
-    };
+    return () => controller.abort();
     // serverKey tracks host-set changes without depending on object identity.
-  }, [from, to, serverKey, reloadToken, autoTick]);
+  }, [from, to, serverKey, reloadToken]);
 
   const totals = useMemo(() => {
     if (!rows) return null;

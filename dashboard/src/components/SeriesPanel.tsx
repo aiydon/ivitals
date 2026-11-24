@@ -819,11 +819,11 @@ function SeriesChart({ data }: { data: SeriesResponse | null }) {
 export function SeriesPanel({
   meta,
   server,
-  refreshTick,
+  reloadToken,
 }: {
   meta: MetaResponse;
   server: string;
-  refreshTick: number;
+  reloadToken: number;
 }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -834,11 +834,19 @@ export function SeriesPanel({
   const [nonce, setNonce] = useState(0);
   const [tab, setTab] = useState<"mem" | "disk" | "gpuMem" | "gpuTemp">("mem");
   const queryRef = useRef("");
+  const latestRef = useRef("");
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
-    setFrom((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
-    setTo((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
+    const previousLatest = latestRef.current;
+    latestRef.current = latest;
+    const advance = (current: string) => {
+      if (!current) return latest;
+      if (current === previousLatest && latest !== previousLatest) return latest;
+      return meta.dates.includes(current) ? current : latest;
+    };
+    setFrom(advance);
+    setTo(advance);
   }, [meta]);
 
   useEffect(() => {
@@ -863,7 +871,7 @@ export function SeriesPanel({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [server, from, to, maxPoints, nonce, refreshTick]);
+  }, [server, from, to, maxPoints, nonce, reloadToken]);
 
   const gaps = data ? internalGaps(data) : [];
   const points = data?.points ?? [];

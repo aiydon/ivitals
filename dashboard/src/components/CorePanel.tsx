@@ -155,11 +155,11 @@ function CoreHeatmap({ data }: { data: CoresResponse | null }) {
 export function CorePanel({
   meta,
   server,
-  refreshTick,
+  reloadToken,
 }: {
   meta: MetaResponse;
   server: string;
-  refreshTick: number;
+  reloadToken: number;
 }) {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -169,11 +169,19 @@ export function CorePanel({
   const [loading, setLoading] = useState(false);
   const [nonce, setNonce] = useState(0);
   const queryRef = useRef("");
+  const latestRef = useRef("");
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
-    setFrom((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
-    setTo((previous) => (previous && meta.dates.includes(previous) ? previous : latest));
+    const previousLatest = latestRef.current;
+    latestRef.current = latest;
+    const advance = (current: string) => {
+      if (!current) return latest;
+      if (current === previousLatest && latest !== previousLatest) return latest;
+      return meta.dates.includes(current) ? current : latest;
+    };
+    setFrom(advance);
+    setTo(advance);
   }, [meta]);
 
   useEffect(() => {
@@ -198,7 +206,7 @@ export function CorePanel({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [server, from, to, maxFrames, nonce, refreshTick]);
+  }, [server, from, to, maxFrames, nonce, reloadToken]);
 
   const gaps = data ? internalGaps(data) : [];
 

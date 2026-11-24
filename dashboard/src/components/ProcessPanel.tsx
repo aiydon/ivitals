@@ -27,26 +27,31 @@ function StateBadge({ state }: { state: string | null }) {
 export function ProcessPanel({
   meta,
   server,
-  refreshTick,
+  reloadToken,
 }: {
   meta: MetaResponse;
   server: string;
-  refreshTick: number;
+  reloadToken: number;
 }) {
   const [date, setDate] = useState("");
   const [top, setTop] = useState("20");
   const [data, setData] = useState<ProcessesResponse | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
   const queryRef = useRef("");
+  const latestRef = useRef("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     const latest = meta.dates[0] ?? "";
-    setDate((previous) =>
-      previous && meta.dates.includes(previous) ? previous : latest,
-    );
+    const previousLatest = latestRef.current;
+    latestRef.current = latest;
+    setDate((previous) => {
+      if (!previous) return latest;
+      if (previous === previousLatest && latest !== previousLatest) return latest;
+      return meta.dates.includes(previous) ? previous : latest;
+    });
   }, [meta]);
 
   useEffect(() => {
@@ -71,7 +76,7 @@ export function ProcessPanel({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [server, date, top, nonce, refreshTick]);
+  }, [server, date, top, nonce, reloadToken]);
 
   return (
     <section className="panel">

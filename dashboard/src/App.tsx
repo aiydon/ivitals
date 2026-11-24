@@ -18,7 +18,7 @@ import { FleetPanel } from "./components/Fleet";
 import { OverviewPanel } from "./components/Overview";
 import { ProcessPanel } from "./components/ProcessPanel";
 import { SeriesPanel } from "./components/SeriesPanel";
-import { formatBytes, formatDateTime, relativeTime } from "./format";
+import { formatBytes, formatDateTime } from "./format";
 import type { MetaResponse, OverviewResponse } from "./shared/types";
 import { useTheme } from "./theme";
 
@@ -31,8 +31,6 @@ const TAB_LABEL: Record<HostTab, string> = {
   cores: "多核",
   processes: "进程",
 };
-
-const AUTO_REFRESH_SECS = 60;
 
 interface Route {
   view: "fleet" | "host";
@@ -66,7 +64,6 @@ export function App() {
   const [overviewError, setOverviewError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [nonce, setNonce] = useState(0);
-  const [refreshTick, setRefreshTick] = useState(0);
   const [route, setRoute] = useState<Route>(parseRoute);
   const [selected, setSelected] = useState(() => {
     const initial = parseRoute();
@@ -94,57 +91,33 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    let stopped = false;
     const controller = new AbortController();
-    let retry: ReturnType<typeof setTimeout> | null = null;
-    const load = async () => {
-      try {
-        const next = await api.meta(controller.signal);
-        if (stopped) return;
+    api
+      .meta(controller.signal)
+      .then((next) => {
         setMeta(next);
         setMetaError(null);
-      } catch (error) {
-        if (stopped || controller.signal.aborted) return;
-        setMetaError(errorText(error));
-        retry = setTimeout(load, 5000);
-      }
-    };
-    void load();
-    return () => {
-      stopped = true;
-      controller.abort();
-      if (retry) clearTimeout(retry);
-    };
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setMetaError(errorText(error));
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
     if (!meta) return;
     const controller = new AbortController();
-    let retry: ReturnType<typeof setTimeout> | null = null;
-    const load = async () => {
-      try {
-        const next = await api.overview(controller.signal);
+    api
+      .overview(controller.signal)
+      .then((next) => {
         setOverview(next);
         setOverviewError(null);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        setOverviewError(errorText(error));
-        retry = setTimeout(load, 5000);
-      }
-    };
-    void load();
-    const timer = setInterval(load, 30_000);
-    return () => {
-      controller.abort();
-      clearInterval(timer);
-      if (retry) clearTimeout(retry);
-    };
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setOverviewError(errorText(error));
+      });
+    return () => controller.abort();
   }, [meta, nonce]);
-
-  useEffect(() => {
-    const timer = setInterval(() => setRefreshTick((value) => value + 1), AUTO_REFRESH_SECS * 1000);
-    return () => clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     if (!meta) return;
@@ -286,7 +259,7 @@ export function App() {
         <div className="side-footer">
           <div className="readonly">
             <ShieldCheck size={14} strokeWidth={1.5} aria-hidden="true" />
-            <span>只读 · 自动刷新 {AUTO_REFRESH_SECS}s</span>
+            <span>只读 · 手动刷新</span>
           </div>
           <div className="side-path mono" title={meta.dataDir}>
             <Database size={13} strokeWidth={1.5} aria-hidden="true" />
@@ -316,9 +289,9 @@ export function App() {
             <p className="lede">{lede}</p>
           </div>
           <div className="header-actions">
-            <div className="mono updated" title={formatDateTime(generated)}>
-              <span>更新于 {relativeTime(generated)}</span>
-              <span className="muted">{formatDateTime(generated)}</span>
+            <div className="mono updated" title="仅手动刷新，不会自动重扫">
+              <span>{formatDateTime(generated)}</span>
+              <span className="muted">手动刷新</span>
             </div>
             <button
               className="ghost icon-button"
@@ -382,7 +355,7 @@ export function App() {
           <div className="notice error">
             <strong>看板服务未连接或读取失败</strong>
             <p>{metaError ?? overviewError}</p>
-            <p className="muted small">每 5 秒自动重试；也可以手动刷新。</p>
+
             <button className="ghost" onClick={refresh} disabled={busy}>
               立即重试
             </button>
@@ -408,13 +381,13 @@ export function App() {
           />
         )}
         {!isFleet && route.tab === "telemetry" && (
-          <SeriesPanel meta={meta} server={selected} refreshTick={refreshTick} />
+          <SeriesPanel meta={meta} server={selected} reloadToken={nonce} />
         )}
         {!isFleet && route.tab === "cores" && (
-          <CorePanel meta={meta} server={selected} refreshTick={refreshTick} />
+          <CorePanel meta={meta} server={selected} reloadToken={nonce} />
         )}
         {!isFleet && route.tab === "processes" && (
-          <ProcessPanel meta={meta} server={selected} refreshTick={refreshTick} />
+          <ProcessPanel meta={meta} server={selected} reloadToken={nonce} />
         )}
 
         <footer className="page-footer">
