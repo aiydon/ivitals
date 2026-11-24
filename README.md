@@ -301,7 +301,8 @@ make stop
 ```
 
 Both run outside the terminal (`setsid nohup`), so closing SSH does not stop
-monitoring. The dashboard reconnects automatically after a restart.
+monitoring. The dashboard does not poll; press 刷新 after starting or restarting
+the collector.
 
 Each host runs in its own tick task, so a slow SSH host only delays itself
 (`MissedTickBehavior::Skip` drops its own backlog). The SSH session is reused
